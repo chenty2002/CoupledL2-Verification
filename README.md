@@ -71,7 +71,7 @@
     - Inclusivity: if a line is valid in L1, L2 must hold the line or an in-flight MSHR must cover it (timer-guarded assumption + `fvAssert`).
     - Data consistency: forbid conflicting accesses on the same address; shared BRANCH replicas must agree on data or be covered by in-flight MSHRs.
   - RocketChip-InclusiveCache (`code/RocketChip-InclusiveCache/inclusivecache-verification/src/test/scala/TestTop.scala`):
-    - Deadlock freeness: per-MSHR `request_valid` → `allocate.valid` bounded progress using `astRelaxedLiveness(..., 1000)`.
+    - Deadlock freeness: per-MSHR `request_valid` → `allocate.valid || !request_valid` bounded progress using `astRelaxedLiveness(..., 1000)`.
 
 - JasperGold scripts:
 
