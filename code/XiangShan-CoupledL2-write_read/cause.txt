@@ -1,0 +1,1 @@
+2 个 L2 针对同一地址的并发 Acquire/Release 让两次读写请求的处理逻辑冲突，使读取的值发生了变化。L2_0 和 L2_1 同时发送了 Release 和 ProbeAck，而 HuanCun 先处理了 ProbeAck，导致此前 L2_0 发送的 Acquire 请求在 Release 处理之前先读取了内存中的旧副本

@@ -1,257 +1,317 @@
 # CoupledL2 Verification
 
-### Files
+> Artifacts for the paper:
+> **Protocol-Independent Bug-Hunting for Industrial Non-Blocking Cache Hierarchies in an Agile Chisel Framework**
 
-```shell
+---
+
+**Contents**
+
+- [CoupledL2 Verification](#coupledl2-verification)
+  - [Overview](#overview)
+    - [Current Snapshot Organization](#current-snapshot-organization)
+  - [Repository Structure](#repository-structure)
+  - [Requirements](#requirements)
+    - [Recommended Toolchain](#recommended-toolchain)
+    - [Root Makefile Checks](#root-makefile-checks)
+  - [Quick Start](#quick-start)
+    - [Index Mapping](#index-mapping)
+    - [Common Commands](#common-commands)
+  - [Experimental Parameter Reduction](#experimental-parameter-reduction)
+    - [Default Verification Profile](#default-verification-profile)
+    - [Paper Parameter Reduction Table](#paper-parameter-reduction-table)
+    - [Code Location Mapping](#code-location-mapping)
+  - [Dataset](#dataset)
+    - [Critical Errors](#critical-errors)
+  - [Results](#results)
+    - [Reported Highlights](#reported-highlights)
+
+---
+
+## Overview
+
+This repository contains two case studies:
+
+1. XiangShan CoupledL2-based hierarchy.
+2. RocketChip InclusiveCache-based hierarchy.
+
+| Item | Description |
+| --- | --- |
+| Workflow Stage 1 | Bug-hunting-ready DUV construction |
+| Workflow Stage 2 | Counterexample-first model checking |
+| Property Categories | Progress stall/deadlock freeness, data consistency, inclusion-policy conformance, protocol-state legality |
+
+### Current Snapshot Organization
+
+1. Deadlock-focused cases are organized as deadlock-v0 to deadlock-v4.
+2. Consistency-focused cases are organized as copy_equality and write_read.
+3. Protocol-state-legality-focused case is organized as peer-l2.
+4. Inclusion-policy conformance is covered in properties but does not have a standalone case directory in this snapshot.
+
+---
+
+## Repository Structure
+
+```text
 .
-├── code
-│   ├── pylibfst-cache
-│   │   ├── cache
-│   │   │   ├── ...
-│   │   │   ├── tllog_parser.py
-│   │   │   ├── tllog_visual.py
-│   │   │   └── deadlock_parser.py
-│   │   └── README.md
-│   ├── RocketChip-InclusiveCache
-│   │   ├── generators
-│   │   │   ├── ...
-│   │   │   ├── rocket-chip
-│   │   │   ├── rocket-chip-inclusive-cache
-│   │   │   └── MessageGenerator
-│   │   └── inclusivecache-verification
-│   │       ├── Makefile
-│   │       ├── README.md
-│   │       └── src
-│   └── XiangShan-CoupledL2
-│       ├── ...
-│       ├── coupledL2
-│       │   ├── ...
-│       │   ├── rocket-chip
-│       │   ├── HuanCun
-│       │   ├── src
-│       │   └── utility
-│       └── src
-├── figures
-├── jg-example
-├── README.md
-└── waveforms
+|- code
+|  |- RocketChip-InclusiveCache
+|  |  |- Chisel
+|  |  |- Verilog
+|  |  `- inclusivecache-verification
+|  |- XiangShan-CoupledL2-copy_equality
+|  |  |- Chisel
+|  |  |- Verilog
+|  |  |- cause.txt
+|  |  `- XiangShan-CoupledL2-copy_equality.fst
+|  |- XiangShan-CoupledL2-write_read
+|  |  |- Chisel
+|  |  |- Verilog
+|  |  |- cause.txt
+|  |  `- XiangShan-CoupledL2-write_read-1017.fst
+|  |- XiangShan-CoupledL2-peer-l2
+|  |  |- Chisel
+|  |  |- Verilog
+|  |  |- cause.txt
+|  |  `- XiangShan-CoupledL2-peer-l2.fst
+|  |- XiangShan-CoupledL2-deadlock-v0
+|  |  |- Chisel
+|  |  |- Verilog
+|  |  |- cause.txt
+|  |  `- XiangShan-CoupledL2-deadlock-v0.fst
+|  |- XiangShan-CoupledL2-deadlock-v1
+|  |- XiangShan-CoupledL2-deadlock-v2
+|  |- XiangShan-CoupledL2-deadlock-v3
+|  `- XiangShan-CoupledL2-deadlock-v4
+|- figures
+|  |- deadlock-1.png
+|  |- deadlock-2.png
+|  |- deadlock-3.png
+|  |- TileLink_state_coherence.png
+|  `- consistency.png
+|- Makefile
+`- README.md
 ```
 
-- Chisel codes:
+Notes:
+Each XiangShan version directory is self-contained with Chisel, Verilog, and an FST trace.
 
-  All the verification codes are in directory `code` and implements the two case studies. Two verification harnesses are provided:
-  
-  1. XiangShan-CoupledL2: L1 = MessageGenerator, L2 = CoupledL2, L3 = HuanCun, RAM = TLRAM (under `code/XiangShan-CoupledL2`).
-  2. RocketChip-InclusiveCache (Chipyard based): L1 = MessageGenerator, L2 = InclusiveCache, RAM = TLRAM (under `code/RocketChip-InclusiveCache`).
+---
 
-  Mechanism I (TileLink Message Generator):
-  - XiangShan: `code/XiangShan-CoupledL2/src/main/scala/messageGenerator`
-  - InclusiveCache: `code/RocketChip-InclusiveCache/generators/MessageGenerator`
+## Requirements
 
-  Mechanism II (Parameter Reduction & formal configuration):
-  - XiangShan top / parameters & assertions: `code/XiangShan-CoupledL2/src/test/scala/coupledL2Verification/VerifyTop.scala`
-  - InclusiveCache top / parameters & assertions: `code/RocketChip-InclusiveCache/inclusivecache-verification/src/test/scala/TestTop.scala`
+### Recommended Toolchain
 
-  Mechanism III (Auxiliary Synchronization Modules):
-  - Directory mirror: `code/XiangShan-CoupledL2/coupledL2/src/main/scala/coupledL2/DirectoryTest.scala`
-  - Data storage mirror: `code/XiangShan-CoupledL2/coupledL2/src/main/scala/coupledL2/DataStorageTest.scala`
-  These run in lock-step with `Directory` and `DataStorage` to provide multi-read visibility without altering functional memories.
+| Tool | Version | Purpose |
+| --- | --- | --- |
+| Java | 8 | Build/runtime dependency |
+| Scala | 2.13.x | Chisel/verification codebase |
+| mill | 0.11.1 | XiangShan variant builds |
+| sbt | latest stable | InclusiveCache build flow |
+| JasperGold (jg) | installed and in PATH | Formal runs |
 
-  Enhanced ChiselFV (bounded liveness, unified engine invocation):
-  - XiangShan implementation: `code/XiangShan-CoupledL2/src/main/scala/chiselFv`
-  - InclusiveCache implementation: `code/RocketChip-InclusiveCache/inclusivecache-verification/src/main/scala/chiselFv`
+### Root Makefile Checks
 
-  Deadlock debugging methodology:
-  - Scripts: `code/pylibfst-cache/cache` (`deadlock_parser.py`, `tllog_parser.py`, `tllog_visual.py`).
+1. Compile stage: java and python are required.
+2. XiangShan variants (index 0-7): mill required before compile.
+3. InclusiveCache (index 8): sbt required before compile.
+4. Verification stage (`setup.sh`): jg required before formal run.
 
-  Property assertions:
-  - XiangShan-CoupledL2 (`code/XiangShan-CoupledL2/src/test/scala/coupledL2Verification/VerifyTop.scala`):
-    - Deadlock freeness: bounded liveness over per-MSHR timers via `astRelaxedLiveness`/`fvAssert`.
-    - TileLink state coherence: mutual-exclusion across L2–L2 and L1–L2 illegal state pairs using bored directory/tag arrays.
-    - Inclusivity: if a line is valid in L1, L2 must hold the line or an in-flight MSHR must cover it (timer-guarded assumption + `fvAssert`).
-    - Data consistency: forbid conflicting accesses on the same address; shared BRANCH replicas must agree on data or be covered by in-flight MSHRs.
-  - RocketChip-InclusiveCache (`code/RocketChip-InclusiveCache/inclusivecache-verification/src/test/scala/TestTop.scala`):
-    - Deadlock freeness: per-MSHR `request_valid` → `allocate.valid || !request_valid` bounded progress using `astRelaxedLiveness(..., 1000)`.
+---
 
-- JasperGold scripts:
+## Quick Start
 
-  An example of verification using JasperGold is within directory `jg-example`. It consists of a few Verilog/SystemVerilog codes and an automated script. By running the script in the command line, a .tcl file for running JasperGold will be generated and then JasperGold will be invoked to start verification according to this tcl script.
+The root Makefile provides one-click dispatch:
 
-- Error waveforms:
+```bash
+make help
+make verify <index>
+```
 
-  The waveforms of the critical errors (described later in this README) are located in directory `waveforms`, recording the scenarios of the counterexamples.
+### Index Mapping
 
-### Environment Configurations
+| Index | Case Directory |
+| ---: | --- |
+| 0 | XiangShan-CoupledL2-copy_equality |
+| 1 | XiangShan-CoupledL2-write_read |
+| 2 | XiangShan-CoupledL2-deadlock-v0 |
+| 3 | XiangShan-CoupledL2-deadlock-v1 |
+| 4 | XiangShan-CoupledL2-deadlock-v2 |
+| 5 | XiangShan-CoupledL2-deadlock-v3 |
+| 6 | XiangShan-CoupledL2-deadlock-v4 |
+| 7 | XiangShan-CoupledL2-peer-l2 |
+| 8 | RocketChip-InclusiveCache |
 
-#### Run Verification
+### Common Commands
 
-##### XiangShan-CoupledL2
+Run one XiangShan case:
 
-The verification environment has been configured to compile or verify CoupledL2 with one click. To compile:
+```bash
+make verify 0
+```
 
-- install Java 8 and Scala 2.13.10
-- install [mill](https://github.com/com-lihaoyi/mill) 0.11.1
-- run `cd code/XiangShan-CoupledL2 && make verify`
+Run InclusiveCache case:
 
-This will generate the Verilog code `VerifyTop.sv` in directory `code/XiangShan-CoupledL2/Verilog`. In order to monitor verification process more conveniently, we suggest replacing `VerifyTop.sv` in the `jg-example` directory and invoking JasperGold in the command line manually.
+```bash
+make verify 8
+```
 
-##### RocketChip-InclusiveCache
+Direct local flow example:
 
-Unlike CoupledL2, this project uses sbt to compile:
+```bash
+cd code/XiangShan-CoupledL2-write_read/Chisel
+make auto
+cd ../Verilog
+./setup.sh VerifyTop*.sv
+```
 
-- install Java 8 and Scala 2.13.10
-- install [sbt](https://www.scala-sbt.org)
-- run `cd code/RocketChip-InclusiveCache && make -C inclusive-verification verilog`
+Override verification mode example:
 
-This will generate the Verilog code `TestTop.sv` in directory `code/RocketChip-InclusiveCache/inclusivecache-verification/build`. In order to monitor verification process more conveniently, we suggest replacing `TestTop.sv` in the `jg-example` directory and invoking JasperGold in the command line manually.
+```bash
+make verify 1 VERIFY_MODE=large
+```
 
-#### CoupledL2 Versions
+---
 
-The verification environment is based on
+## Experimental Parameter Reduction
 
-[CoupledL2](https://github.com/OpenXiangShan/CoupledL2) branch: master 
+### Default Verification Profile
 
-​	commit: 514c1ad27c7ab0185a3c07c85146009346b5890d
+For XiangShan cases (index 0-7), the root Makefile now sets default elaboration environment variables:
 
-#### InclusiveCache Versions
+1. `VERIFY_MODE=small`
+2. msggen input mode is fixed as the default harness input source.
 
-The verification environment is based on
+This means `make verify <index>` uses the reduced-parameter profile by default. For user-facing switching, only `VERIFY_MODE=small|large` is exposed.
 
-[chipyard](https://github.com/ucb-bar/chipyard.git) branch: main 
+### Paper Parameter Reduction Table
 
-​	commit: 973f8732d4ffeb8cc231edf109e84eef114e3d6e
+The full development-vs-verification parameter values used in the paper are recorded in `tables/parameters.tex`.
+
+| Parameter | Cache Component | Development Value | Verification Value |
+| --- | --- | ---: | ---: |
+| ways | L2 Cache | 8 | 2 |
+| ways | L3 Cache | 16 | 2 |
+| sets | L2 Cache | 512 | 4 |
+| sets | L3 Cache | 4096 | 4 |
+| banks | L2/L3 Cache | 4 | 1 |
+| blockBytes | L2/L3 Cache | 64 | 2 |
+| busWidth | L2/L3 Cache | 256 | 8 |
+| mshrs | L2 Cache | 16 | 4 |
+| mshrs | L3 Cache | 16 | 6 |
+| address | L1/L2/L3/RAM | 24 bits | 5 bits |
+
+### Code Location Mapping
+
+The repository code stores these reductions as harness-level knobs (`if (useLarge) ... else ...`) and explicit bank/address settings in each XiangShan case. Representative locations are listed below.
+
+| Parameter | Representative code location(s) | How it is encoded |
+| --- | --- | --- |
+| ways / sets / blockBytes / mshrs (L2/L3) | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `L2Param(...)` and `HCCacheParameters(...)` use `if (useLarge) ... else ...`, where the `else` branch is the reduced verification profile. |
+| ways / sets / blockBytes (msggen front-end) | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `MessageGeneratorParam(...)` uses `if (useLarge) ... else ...` to reduce request-space complexity for formal runs. |
+| banks | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` and `code/XiangShan-CoupledL2-copy_equality/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `case huancun.BankBitsKey => 0` enforces a single-bank setting for verification. |
+| busWidth | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala`, `code/XiangShan-CoupledL2-write_read/Chisel/src/main/scala/coupledL2/tl2tl/TL2TLCoupledL2.scala` | Reduced bus width is reflected via `TLChannelBeatBytes(if (useLarge) 32 else 1)` and `beatBytes = (if env VERIFY_MODE=large then 32 else 1)`. |
+| address bits | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `TLRAM(AddressSet(0, if (useLarge) 0xffffffL else 0x1fL), ...)` corresponds to 24-bit vs 5-bit address space. |
+| size mode switch | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala`, `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/AutoVerify.scala` | `VERIFY_MODE` selects small/large; root flow keeps msggen as default input mode. |
+
+---
+
+## Dataset
 
 ### Critical Errors
-Below we summarize representative counterexamples produced by the automated model checking flow. Each corresponds to a violation.
 
-#### Deadlock Freeness
+| Case Directory | Suggested Critical Error Name | Paper Category | Representative ID | Cause Summary |
+| --- | --- | --- | --- | --- |
+| code/XiangShan-CoupledL2-deadlock-v0 | Deadlock Freeness - Probe Starvation | Progress stall/deadlock freeness | 0508 | Continuous same-address prefetch blocks Probe admission; circular wait forms. |
+| code/XiangShan-CoupledL2-deadlock-v1 | Deadlock Freeness - Replacement Conflict I | Progress stall/deadlock freeness | 0531 | Same-set X/Y interaction plus replacement and Probe interlock leads to deadlock. |
+| code/XiangShan-CoupledL2-deadlock-v2 | Deadlock Freeness - Replacement Conflict II | Progress stall/deadlock freeness | 0607 | Same root cause family as 0531/0607, reproduced in another version point. |
+| code/XiangShan-CoupledL2-deadlock-v3 | Deadlock Freeness - High Same-Set Contention | Progress stall/deadlock freeness | 0621 | Too many same-set lines saturate ways; replacement and Probe dependency deadlocks. |
+| code/XiangShan-CoupledL2-deadlock-v4 | Deadlock Freeness - Bounded-Latency Mismatch | Progress stall/deadlock freeness | 1213 | HuanCun parallelism bottleneck cannot satisfy a 200-cycle completion budget. |
+| code/XiangShan-CoupledL2-peer-l2 | Protocol-State Legality - Peer L2 Tip-Branch Conflict | Protocol-state legality | 0712 family | Probe may be accepted before ReleaseAck ordering is fully respected, creating illegal peer state combination. |
+| code/XiangShan-CoupledL2-copy_equality | Data Consistency - Copy Equality Update Race | Data consistency | copy_equality case | Near-simultaneous ProbeAck and ReleaseData causes dirty data update race. |
+| code/XiangShan-CoupledL2-write_read | Data Consistency - Write-Read Divergence | Data consistency | 1017 | Concurrent Acquire/Release ordering conflict returns stale memory value. |
 
-##### 0508
+Relevant files:
 
-![deadlock-1](figures/deadlock-1.png)
+Per-case full traces: each case directory contains XiangShan-CoupledL2-*.fst.
 
-Timeline (prefetch requests to the same address induce Probe starvation):
+<details>
+<summary><strong>Assertion Catalog (Root VerifyTop Sample)</strong></summary>
 
-- ① External stimulus issues simultaneous prefetch-style requests for address 0 to $\mathtt{L1_0}$ and $\mathtt{L1_1}$.
-- ② Both $\mathtt{L1}$ instances miss; each sends an **AcquireBlock** for address 0 to its attached $\mathtt{L2}$ ($\mathtt{L2_0}$ / $\mathtt{L2_1}$).
-- ③ Both $\mathtt{L2}$ miss and forward **AcquireBlock** for address 0 to $\mathtt{L3}$ (HuanCun).
-- ④ $\mathtt{L3}$ services $\mathtt{L2_1}$ first (no copy resident); fetches from memory and returns **GrantData** to $\mathtt{L2_1}$. 
-- ⑤ $\mathtt{L2_1}$ responds with **GrantAck** to $\mathtt{L3}$. 
-- ⑥ $\mathtt{L2_1}$ installs the line (state None→Trunk) and sends **GrantData** downstream to $\mathtt{L1_1}$. 
-- ⑦ $\mathtt{L1_1}$ returns **GrantAck**.
-- ⑧ $\mathtt{L3}$ begins servicing $\mathtt{L2_0}$'s miss; because $\mathtt{L1_1}/\mathtt{L2_1}$ already hold the line it issues **Probe** to $\mathtt{L2_1}$.
-- ⑨ $\mathtt{L2_1}$ forwards **Probe** to $\mathtt{L1_1}$.
+<br>
 
-Root cause: Continuous prefetch requests keep $\mathtt{L1_1}$ pipeline occupied with the same set+tag, making `blockB_s1` permanently high. The B-channel (**Probe**) request cannot enter MainPipe; $\mathtt{L2_1}$ and $\mathtt{L3}$ wait indefinitely for **ProbeAckData**, forming a circular wait on pipeline resources.
+The root VerifyTop.scala is kept as the complete XiangShan-side assertion reference sample.
 
-Fix: Refine MainPipe B-channel blocking conditions so that only specific in-flight Grant-related pipeline stages block B-channel admission, allowing Probe to make forward progress.
+| Root assertion function or primitive | Bug scope in paper | Meaning |
+| --- | --- | --- |
+| l2_mutual / l2_mutual_with_invalid | Protocol-state legality | Forbid illegal state combinations on the same line across peer L2 slices. |
+| l1_l2_mutual / l1_l2_mutual_with_invalid | Protocol-state legality + inclusion constraints | Forbid impossible L1-L2 state pairings for the same line. |
+| l2_l3_mutual / l2_l3_mutual_with_invalid | Protocol-state legality | Forbid impossible L2-L3 state pairings for the same line. |
+| l1l2_inclusive | Inclusion-policy conformance | If a line is valid in L1, L2 must contain the line or be covered by in-flight patch conditions. |
+| l2_consistency | Data consistency | If two L2 slices hold the same line in BRANCH state, data must be equal. |
+| astRelaxedLiveness (sample snippets) | Progress stall/deadlock freeness | Bounded liveness templates for no-progress waiting conditions. |
 
-```diff
-diff -urN verify-l2/src/main/scala/coupledL2/MainPipe.scala CoupledL2/src/main/scala/coupledL2/MainPipe.scala
---- verify-l2/src/main/scala/coupledL2/MainPipe.scala
-+++ CoupledL2/src/main/scala/coupledL2/MainPipe.scala
-@@ -563,8 +563,8 @@
-   io.toReqArb.blockB_s1 :=
-     task_s2.valid && bBlock(task_s2.bits) ||
-     task_s3.valid && bBlock(task_s3.bits) ||
--    task_s4.valid && bBlock(task_s4.bits, tag = true) ||
--    task_s5.valid && bBlock(task_s5.bits, tag = true)
-+    task_s4.valid && bBlock(task_s4.bits, tag = true) && task_s4.bits.opcode(2, 1) === Grant(2, 1) ||
-+    task_s5.valid && bBlock(task_s5.bits, tag = true) && task_s5.bits.opcode(2, 1) === Grant(2, 1)
- 
-   io.toReqArb.blockA_s1 := io.toReqBuf(0) || io.toReqBuf(1)
-```
+Notes:
 
-##### 0531/0607
+1. In root VerifyTop.scala, the default enabled check is consistency_spec(); other groups are documented as sample switchable suites.
+2. Deadlock properties in the deadlock-* variants are moved to controller-level MSHRCtl.scala assertions rather than kept in VerifyTop.scala.
 
-![deadlock-2](figures/deadlock-2.png)
+</details>
 
-Timeline (mutual replacement pressure + set serialization in $\mathtt{L3}$):
+<details>
+<summary><strong>Assertion Locations by Version</strong></summary>
 
-- ① External stimulus sends prefetch for address 0 to $\mathtt{L1_1}$.
-- ② $\mathtt{L1_1}$ miss → **AcquireBlock** to $\mathtt{L2_1}$.
-- ③ $\mathtt{L2_1}$ miss → **AcquireBlock** to $\mathtt{L3}$.
-- ④ $\mathtt{L3}$ processes $\mathtt{L2_1}$; copies already reside in $\mathtt{L1_0}/\mathtt{L2_0}$ → issues **Probe** for address 0 to $\mathtt{L2_0}$.
-- ⑤ $\mathtt{L2_0}$ forwards **Probe** to $\mathtt{L1_0}$.
-- ⑥ $\mathtt{L1_0}$ must evict (its way holding address 0 now occupied by address 4) → replacement required.
-- ⑦ Concurrently $\mathtt{L1_0}$ issues **AcquireBlock** for address 4 to $\mathtt{L2_0}$.
-- ⑧ $\mathtt{L2_0}$ miss on address 4 → **AcquireBlock** to $\mathtt{L3}$.
+<br>
 
-Root cause: HuanCun ($\mathtt{L3}$) enforces per-set serialization: Probe for set S (address 0) blocks subsequent Acquire for another line with same set (address 4). The evicting $\mathtt{L1_0}$ cannot complete replacement (needs Acquire completion) while $\mathtt{L3}$ cannot advance the Acquire until the Probe sequence finishes. Circular dependency forms across replacement, Probe, and serialized set arbitration.
+| Version / case | Primary assertion location | Covered bug scope |
+| --- | --- | --- |
+| XiangShan-CoupledL2-copy_equality | code/XiangShan-CoupledL2-copy_equality/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala | Data consistency |
+| XiangShan-CoupledL2-write_read | code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala | Data consistency + protocol constraints |
+| XiangShan-CoupledL2-peer-l2 | code/XiangShan-CoupledL2-peer-l2/Chisel/src/test/scala/coupledL2/VerifyTop.scala | Protocol-state legality |
+| XiangShan-CoupledL2-deadlock-v0 | code/XiangShan-CoupledL2-deadlock-v0/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
+| XiangShan-CoupledL2-deadlock-v1 | code/XiangShan-CoupledL2-deadlock-v1/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
+| XiangShan-CoupledL2-deadlock-v2 | code/XiangShan-CoupledL2-deadlock-v2/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
+| XiangShan-CoupledL2-deadlock-v3 | code/XiangShan-CoupledL2-deadlock-v3/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
+| XiangShan-CoupledL2-deadlock-v4 | code/XiangShan-CoupledL2-deadlock-v4/Chisel/src/main/scala/coupledL2/tl2tl/MSHRCtl.scala | Progress stall/deadlock freeness |
 
-Fix: Adjust CoupledL2 replacement algorithm to select an alternative way after repeated block events, breaking the cycle. 
-(Refer to CoupledL2 on Github: issues #80–#83, #88, #94, #95, #99, #100, master branch commit b485c6b7e6049fffed5104a5e8a29b29c33e6547; kunminghu branch commit f286ffa127583eb4d52cfd856f9ce6d87d00ec82)
+Important deadlock note:
 
-##### 0621
+1. For deadlock-v0 to deadlock-v4, deadlock assertions are in MSHRCtl.scala.
+2. VerifyTop.scala in deadlock variants is mainly used as formal harness wiring and stimulus/observation shell.
 
-![deadlock-3](figures/deadlock-3.png)
+</details>
 
-Extended scenario: high contention—all ways of $\mathtt{L2_0}$ filled by lines mapping to the same set; any new request triggers replacement while multiple in-flight operations target identical set.
+<details>
+<summary><strong>InclusiveCache Assertion Migration</strong></summary>
 
-- ① Prefetch for address 0 to $\mathtt{L1_1}$.
-- ② $\mathtt{L1_1}$ miss → **AcquireBlock** to $\mathtt{L2_1}$.
-- ③ $\mathtt{L2_1}$ miss → **AcquireBlock** to $\mathtt{L3}$.
-- ④ $\mathtt{L3}$ sees residency in $\mathtt{L1_0}/\mathtt{L2_0}$ → **Probe** to $\mathtt{L2_0}$.
-- ⑤ $\mathtt{L2_0}$ needs replacement (target way occupied by other same-set addresses).
-- ⑥ All ways of $\mathtt{L2_0}$ busy; parallel AcquireBlock requests for the same set already outstanding to $\mathtt{L3}$.
+<br>
 
-Root cause: Per-set serialization in $\mathtt{L3}$ + saturation of ways prevents completion of replacement needed to respond to Probe; Probe completion prerequisite (replacement write-back) waits on Acquire responses that are themselves stalled behind the Probe sequence.
+InclusiveCache paper-related assertions have been migrated into the real project verification entry:
 
-Fix: Limit L1 parallelism (reduce simultaneous same-set request issuance) to mitigate way saturation and unblock Probe progress. 
-(Refer to CoupledL2 on Github: issues #127, #143)
+1. code/RocketChip-InclusiveCache/Chisel/inclusivecache-verification/src/test/scala/TestTop.scala
 
-#### TileLink State Coherence
+Current retained property groups in that TestTop are paper-scoped only:
 
-##### 0712
+1. liveness_spec (progress/deadlock freeness)
+2. l1_l1_mutual_specs (protocol-state legality)
+3. l1_l2_mutual_specs (protocol-state legality / coherence constraints)
+4. l1_l2_inclusive_specs (inclusion-policy conformance)
+5. l1_l1_consistency_specs (data consistency)
 
-![coherence](figures/TileLink_state_coherence.png)
+Non-paper auxiliary assertions (internal MSHR/dir sanity groups) were removed from this TestTop to keep the property set aligned with the paper bug scope.
 
-Violation: Simultaneous illegal copy-state combination (**Tip**–**Branch**) for the same address across two $\mathtt{L2}$ caches, contravening TileLink coherence rules (ReleaseAck must precede accepting a Probe on the same line).
+</details>
 
-Initial state:
-- $\mathtt{L2_0}$: holds 0b1000 (Branch), 0b0100 (Tip)
-- $\mathtt{L2_1}$: holds 0b1100 (Branch), 0b0000 (Tip)
+---
 
-Timeline:
-- ① External stimulus issues request for 0b0000 to $\mathtt{L1_0}$.
-- ② Miss → **Acquire** from $\mathtt{L1_0}/\mathtt{L2_0}$ to $\mathtt{L3}$.
-- ③ $\mathtt{L3}$ detects residency in $\mathtt{L1_1}/\mathtt{L2_1}$ → sends **Probe** to both.
-- ④ $\mathtt{L1_1}$ emits **Release TtoN**, awaiting **ReleaseAck**.
-- ⑤ $\mathtt{L2_1}$ SinkB accepts **Probe TtoB** for same address before **ReleaseAck** is returned.
-- ⑥ **ProbeAck** processed ahead of pending Release; $\mathtt{L2_1}$ temporarily retains ownership marking.
-- ⑦ $\mathtt{L3}$ completes **AcquireBlock** and sends **GrantData** to $\mathtt{L2_0}$ while $\mathtt{L2_1}$ still lacks **ReleaseAck**.
+## Results
 
-Root cause: Early Probe acceptance prior to Release transaction completion breaks required ordering (Release → ReleaseAck → Probe), enabling transient dual privileged states.
+This repository corresponds to the paper's counterexample-first bug-hunting workflow and keeps the case-study artifacts in a directly reproducible layout.
 
-Fix: Split `replaceConflict` into conditions that block upon either active refill or missing ReleaseAck, preventing premature Probe intake:
-```scala
-val replaceConflictMask = VecInit(io.msInfo.map(s =>
-  s.valid && s.bits.set === task.set && s.bits.metaTag === task.tag &&
-    (s.bits.blockRefill || !s.bits.w_releaseack)
-)).asUInt
-```
-After adjustment, SinkB suppresses tasks while a related Release is incomplete, enforcing the protocol sequence.
-(Refer to CoupledL2 on Github: issues #208)
+### Reported Highlights
 
-#### Data Consistency
+1. On XiangShan CoupledL2, the campaign triggers 12 actionable counterexamples under the configured budget.
+2. Triggered failures span progress stall/deadlock, data consistency, and protocol-state legality categories.
+3. The same workflow is transferred to RocketChip InclusiveCache with mechanical adaptation at the harness/property integration layer.
 
-##### 1017
-
-![consistency](figures/consistency.png)
-
-Violation: Data returned by **Grant** diverges from the most recent **ReleaseData** value for the same cache line under concurrent Acquire/Release, breaching the data consistency invariant.
-
-Mechanism (non-inclusive cMSHR scheduling in HuanCun): when concurrent Acquire and Release target the same address:
-- If they choose the same way: Release writes line to $\mathtt{L3}$; Acquire can read updated data directly.
-- If they choose different ways: Release writes to memory; Acquire later reads from memory.
-
-Timeline:
-- ① $\mathtt{L1_1}$ via $\mathtt{L2_1}$ issues **AcquireBlock** for address 0 (miss), occupying an `a_mshr` → request to $\mathtt{L3}$.
-- ② $\mathtt{L3}$ sends **Probe** to $\mathtt{L2_0}$; $\mathtt{L2_0}$ responds **ProbeAck NtoN** (no data).
-- ③ Nearly simultaneously $\mathtt{L2_0}$ initiates **ReleaseData** (replacement) entering a `c_mshr` for same set, selecting a way colliding with pending Acquire.
-- ④ Before Release commits data to $\mathtt{L3}$, Acquire reads memory (stale copy).
-- ⑤ Memory still holds old value; resulting **Grant** `d.data` mismatches intended updated Release data.
-
-Root cause: Way selection & non-inclusive cMSHR ordering permits memory read to precede completion of Release write-back, exposing stale data.
-
-Fix direction: Ensure ordering between Release write completion and subsequent Grant data sourcing for identical lines (e.g., enforce serialization or merge of colliding way selections) – implementation tracked separately.
+The repository datasets (cause notes, traces, waveforms, and assertion locations) are structured to support replay, diagnosis, and fix validation across the two case studies.

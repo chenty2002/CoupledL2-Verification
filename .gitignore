@@ -7,4 +7,6 @@ build/
 .bloop/
 .metals/
 .vscode/
+.DS_Store
 VerilogCodes/
+code/*/Chisel/Verilog

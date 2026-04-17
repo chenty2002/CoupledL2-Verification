@@ -1,0 +1,56 @@
+/** *************************************************************************************
+  * Copyright (c) 2020-2021 Institute of Computing Technology, Chinese Academy of Sciences
+  * Copyright (c) 2020-2021 Peng Cheng Laboratory
+  *
+  * XiangShan is licensed under Mulan PSL v2.
+  * You can use this software according to the terms and conditions of the Mulan PSL v2.
+  * You may obtain a copy of Mulan PSL v2 at:
+  *          http://license.coscl.org.cn/MulanPSL2
+  *
+  * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND,
+  * EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT,
+  * MERCHANTABILITY OR FIT FOR A PARTICULAR PURPOSE.
+  *
+  * See the Mulan PSL v2 for more details.
+  * *************************************************************************************
+  */
+
+package coupledL2AsL1
+
+import chisel3._
+import coupledL2._
+import coupledL2.tl2tl._
+import chisel3.util._
+import freechips.rocketchip.diplomacy._
+import freechips.rocketchip.tilelink.{TLEdgeIn, TLEdgeOut}
+import org.chipsalliance.cde.config.Parameters
+
+class TLCoupledL2AsL1(implicit p: Parameters) extends TL2TLCoupledL2 {
+  println(s"prefetchers: $prefetchOpt")
+  assert(prefetchOpt.exists(_.isInstanceOf[InputAsPrefectchParam]))
+
+  class CoupledL2AsL1Imp(wrapper: LazyModule) extends CoupledL2Imp(wrapper) {
+    override lazy val prefetcher = prefetchOpt.map(_ => Module(new Input2Req()(pftParams)))
+    val fullAddrBits = node.in.head._2.bundle.addressBits
+
+    // keep io_name same as before
+    val io_inputAddr = IO(Input(UInt(fullAddrBits.W)))
+    val io_inputNeedT = IO(Input(Bool()))
+
+    prefetchOpt.foreach {
+       _ =>
+        prefetcher.get.io_inputAddr := io_inputAddr
+        prefetcher.get.io_inputNeedT := io_inputNeedT
+    }
+
+    override def createSlice(i: Int, edgeIn: TLEdgeIn, edgeOut: TLEdgeOut): Slice =
+      Module(new L1Slice()(p.alterPartial {
+        case EdgeInKey  => edgeIn
+        case EdgeOutKey => edgeOut
+        case BankBitsKey => bankBits
+        case SliceIdKey => i
+      }))
+  }
+
+  override lazy val module = new CoupledL2AsL1Imp(this)
+}

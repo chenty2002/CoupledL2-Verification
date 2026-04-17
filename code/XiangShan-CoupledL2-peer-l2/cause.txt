@@ -1,0 +1,3 @@
+TileLink 手册规定，L1 需要在收到 ReleaseAck 之后才能发送 Probe，而CoupledL2在实现时遗漏了这一细节，使两个L2在相同地址对应的缓存行状态出现了Tip-Branch的组合
+
+修改发送Probe的条件，补充TileLink协议的细节
