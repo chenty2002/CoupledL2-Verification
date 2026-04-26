@@ -13,12 +13,15 @@
   - [Repository Structure](#repository-structure)
   - [Requirements](#requirements)
     - [Recommended Toolchain](#recommended-toolchain)
+    - [TL-Test Toolchain Additions](#tl-test-toolchain-additions)
     - [Root Makefile Checks](#root-makefile-checks)
   - [Quick Start](#quick-start)
     - [Index Mapping](#index-mapping)
     - [Common Commands](#common-commands)
+    - [Ablation Commands](#ablation-commands)
+  - [Ablation Study Mapping](#ablation-study-mapping)
+    - [Paper-to-Code Correspondence](#paper-to-code-correspondence)
   - [Experimental Parameter Reduction](#experimental-parameter-reduction)
-    - [Default Verification Profile](#default-verification-profile)
     - [Paper Parameter Reduction Table](#paper-parameter-reduction-table)
     - [Code Location Mapping](#code-location-mapping)
   - [Dataset](#dataset)
@@ -74,6 +77,14 @@ This repository contains two case studies:
 |  |  |- Verilog
 |  |  |- cause.txt
 |  |  `- XiangShan-CoupledL2-peer-l2.fst
+|  |- XiangShan-CoupledL2-Native-L1
+|  |  |- Chisel
+|  |  `- Verilog
+|  `- XiangShan-CoupledL2-TL-Test
+|     |- configs
+|     |- dut
+|     |- main
+|     `- scripts
 |  |- XiangShan-CoupledL2-deadlock-v0
 |  |  |- Chisel
 |  |  |- Verilog
@@ -108,7 +119,23 @@ Each XiangShan version directory is self-contained with Chisel, Verilog, and an 
 | Scala | 2.13.x | Chisel/verification codebase |
 | mill | 0.11.1 | XiangShan variant builds |
 | sbt | latest stable | InclusiveCache build flow |
+| Python | 3.x | Root scripts, preprocessing, and staging utilities |
 | JasperGold (jg) | installed and in PATH | Formal runs |
+
+### TL-Test Toolchain Additions
+
+The TL-Test ablation (`code/XiangShan-CoupledL2-TL-Test`) needs a larger toolchain than the formal-only flow:
+
+| Tool | Purpose |
+| --- | --- |
+| python / python3 | TL-Test helper scripts and staged verification harness processing |
+| mill | Build the CoupledL2-side DUT used by TL-Test |
+| cmake | Configure the TL-Test host build |
+| verilator | Build the Verilator-host executable |
+| C++17 compiler (`g++` or `clang++`) | Compile the TL-Test host and generated Verilator code |
+| sqlite3 development library | Linked by the TL-Test host build (`-lsqlite3`) |
+
+The root `make tltest ...` entry checks for `python`, `mill`, `verilator`, and `cmake`. If your Verilator install lives in a non-default location, TL-Test also supports `VERILATOR_INCLUDE`, `CXX_COMPILER`, and `SQLITE3_ROOT`; see `code/XiangShan-CoupledL2-TL-Test/Makefile`.
 
 ### Root Makefile Checks
 
@@ -116,6 +143,8 @@ Each XiangShan version directory is self-contained with Chisel, Verilog, and an 
 2. XiangShan variants (index 0-7): mill required before compile.
 3. InclusiveCache (index 8): sbt required before compile.
 4. Verification stage (`setup.sh`): jg required before formal run.
+5. TL-Test ablation (`make tltest ...`): python, mill, verilator, cmake required before build.
+6. Native-L1 ablation (`make native-l1`): java, python, mill, jg required.
 
 ---
 
@@ -171,18 +200,58 @@ Override verification mode example:
 make verify 1 VERIFY_MODE=large
 ```
 
+### Ablation Commands
+
+The paper compares the full workflow against several ablation variants. The root `Makefile` exposes the runnable ones directly:
+
+```bash
+# baseline simulation ablation (TL-Test)
+make tltest 2
+
+# w/o parameter reduction
+make verify 1 VERIFY_MODE=large
+
+# w/o bounded liveness as safety primitive
+make verify 2 VERIFY_ABLATION=wo-bounded-liveness
+
+# w/o Simplified L1
+make native-l1
+```
+
+For the Native-L1 flow, the default verified top is `../Chisel/VerifyTop_all.sv`. You can override it if needed:
+
+```bash
+make native-l1 NATIVE_L1_TOP=../Chisel/VerifyTop_all.sv
+```
+
+---
+
+## Ablation Study Mapping
+
+Section 6 of `main.tex` evaluates the full XiangShan workflow against five comparison configurations. The repository mapping is:
+
+### Paper-to-Code Correspondence
+
+| Paper configuration | Repository support | How to run / inspect | Notes |
+| --- | --- | --- | --- |
+| `our workflow` | Main XiangShan cases under `code/XiangShan-CoupledL2-*` | `make verify <index>` | Uses Simplified L1, reduced parameters, synchronization modules, and bounded liveness checks. |
+| `baseline (TL-Test)` | `code/XiangShan-CoupledL2-TL-Test` | `make tltest <case-or-index>` | Simulation-only comparison under the same case selection. |
+| `w/o parameter reduction` | Same XiangShan case directories | `make verify <index> VERIFY_MODE=large` | `VERIFY_MODE=large` switches from the reduced verification profile back to the development-scale parameter setting described in the paper. |
+| `w/o bounded liveness as safety primitive` | Deadlock cases plus `code/preprocess_sva.py` | `make verify <deadlock-index> VERIFY_ABLATION=wo-bounded-liveness` | `preprocess_sva.py` rewrites generated bounded timer assertions into unbounded SVA eventuality checks for this ablation. |
+| `w/o Simplified L1` | `code/XiangShan-CoupledL2-Native-L1` | `make native-l1` | Replaces the paper's Simplified L1 boundary model with a `NativeL1` package derived from XiangShan's original L1-side behavior. |
+| `w/o synchronization modules` | No standalone runnable target in this snapshot | Text-only description | This removal disables the auxiliary synchronized observation mirrors, so state/data-aware checks become uncheckable even though progress checks still conceptually remain. |
+
+About the code layout for these ablations:
+
+1. `code/XiangShan-CoupledL2-TL-Test` is the simulation baseline used for the TL-Test comparison in `main.tex`.
+2. `VERIFY_MODE=small|large` is the switch used to move between the reduced formal profile and the development-value profile for the parameter-reduction ablation.
+3. `code/preprocess_sva.py` implements the bounded-liveness removal by post-processing generated Verilog assertions in the deadlock cases.
+4. `code/XiangShan-CoupledL2-Native-L1` contains the Native-L1 harness used for the `w/o Simplified L1` comparison.
+5. The `w/o Sync Modules` row is documented for correspondence with the paper, but no separate runnable artifact is provided here because the removal intentionally breaks the observability support needed by the relevant properties.
+
 ---
 
 ## Experimental Parameter Reduction
-
-### Default Verification Profile
-
-For XiangShan cases (index 0-7), the root Makefile now sets default elaboration environment variables:
-
-1. `VERIFY_MODE=small`
-2. msggen input mode is fixed as the default harness input source.
-
-This means `make verify <index>` uses the reduced-parameter profile by default. For user-facing switching, only `VERIFY_MODE=small|large` is exposed.
 
 ### Paper Parameter Reduction Table
 
@@ -208,11 +277,11 @@ The repository code stores these reductions as harness-level knobs (`if (useLarg
 | Parameter | Representative code location(s) | How it is encoded |
 | --- | --- | --- |
 | ways / sets / blockBytes / mshrs (L2/L3) | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `L2Param(...)` and `HCCacheParameters(...)` use `if (useLarge) ... else ...`, where the `else` branch is the reduced verification profile. |
-| ways / sets / blockBytes (msggen front-end) | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `MessageGeneratorParam(...)` uses `if (useLarge) ... else ...` to reduce request-space complexity for formal runs. |
+| ways / sets / blockBytes | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `MessageGeneratorParam(...)` uses `if (useLarge) ... else ...` to reduce request-space complexity for formal runs. |
 | banks | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` and `code/XiangShan-CoupledL2-copy_equality/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `case huancun.BankBitsKey => 0` enforces a single-bank setting for verification. |
 | busWidth | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala`, `code/XiangShan-CoupledL2-write_read/Chisel/src/main/scala/coupledL2/tl2tl/TL2TLCoupledL2.scala` | Reduced bus width is reflected via `TLChannelBeatBytes(if (useLarge) 32 else 1)` and `beatBytes = (if env VERIFY_MODE=large then 32 else 1)`. |
 | address bits | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `TLRAM(AddressSet(0, if (useLarge) 0xffffffL else 0x1fL), ...)` corresponds to 24-bit vs 5-bit address space. |
-| size mode switch | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala`, `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/AutoVerify.scala` | `VERIFY_MODE` selects small/large; root flow keeps msggen as default input mode. |
+| size mode switch | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala`, `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/AutoVerify.scala` | `VERIFY_MODE` selects small/large. |
 
 ---
 
@@ -220,16 +289,16 @@ The repository code stores these reductions as harness-level knobs (`if (useLarg
 
 ### Critical Errors
 
-| Case Directory | Suggested Critical Error Name | Paper Category | Representative ID | Cause Summary |
-| --- | --- | --- | --- | --- |
-| code/XiangShan-CoupledL2-deadlock-v0 | Deadlock Freeness - Probe Starvation | Progress stall/deadlock freeness | 0508 | Continuous same-address prefetch blocks Probe admission; circular wait forms. |
-| code/XiangShan-CoupledL2-deadlock-v1 | Deadlock Freeness - Replacement Conflict I | Progress stall/deadlock freeness | 0531 | Same-set X/Y interaction plus replacement and Probe interlock leads to deadlock. |
-| code/XiangShan-CoupledL2-deadlock-v2 | Deadlock Freeness - Replacement Conflict II | Progress stall/deadlock freeness | 0607 | Same root cause family as 0531/0607, reproduced in another version point. |
-| code/XiangShan-CoupledL2-deadlock-v3 | Deadlock Freeness - High Same-Set Contention | Progress stall/deadlock freeness | 0621 | Too many same-set lines saturate ways; replacement and Probe dependency deadlocks. |
-| code/XiangShan-CoupledL2-deadlock-v4 | Deadlock Freeness - Bounded-Latency Mismatch | Progress stall/deadlock freeness | 1213 | HuanCun parallelism bottleneck cannot satisfy a 200-cycle completion budget. |
-| code/XiangShan-CoupledL2-peer-l2 | Protocol-State Legality - Peer L2 Tip-Branch Conflict | Protocol-state legality | 0712 family | Probe may be accepted before ReleaseAck ordering is fully respected, creating illegal peer state combination. |
-| code/XiangShan-CoupledL2-copy_equality | Data Consistency - Copy Equality Update Race | Data consistency | copy_equality case | Near-simultaneous ProbeAck and ReleaseData causes dirty data update race. |
-| code/XiangShan-CoupledL2-write_read | Data Consistency - Write-Read Divergence | Data consistency | 1017 | Concurrent Acquire/Release ordering conflict returns stale memory value. |
+| Case Directory | Suggested Critical Error Name | Bug Category | Cause Summary |
+| --- | --- | --- | --- |
+| code/XiangShan-CoupledL2-deadlock-v0 | Deadlock Freeness - Probe Starvation | Progress stall/deadlock freeness | Continuous same-address prefetch blocks Probe admission; circular wait forms. |
+| code/XiangShan-CoupledL2-deadlock-v1 | Deadlock Freeness - Replacement Conflict I | Progress stall/deadlock freeness | Same-set X/Y interaction plus replacement and Probe interlock leads to deadlock. |
+| code/XiangShan-CoupledL2-deadlock-v2 | Deadlock Freeness - Replacement Conflict II | Progress stall/deadlock freeness | Same root cause family as v1 and v2, reproduced in another version point. |
+| code/XiangShan-CoupledL2-deadlock-v3 | Deadlock Freeness - High Same-Set Contention | Progress stall/deadlock freeness | Too many same-set lines saturate ways; replacement and Probe dependency deadlocks. |
+| code/XiangShan-CoupledL2-deadlock-v4 | Deadlock Freeness - Bounded-Latency Mismatch | Progress stall/deadlock freeness | HuanCun parallelism bottleneck cannot satisfy a 200-cycle completion budget. |
+| code/XiangShan-CoupledL2-peer-l2 | Protocol-State Legality - Peer L2 Tip-Branch Conflict | Protocol-state legality | Probe may be accepted before ReleaseAck ordering is fully respected, creating illegal peer state combination. |
+| code/XiangShan-CoupledL2-copy_equality | Data Consistency - Copy Equality Update Race | Data consistency | Near-simultaneous ProbeAck and ReleaseData causes dirty data update race. |
+| code/XiangShan-CoupledL2-write_read | Data Consistency - Write-Read Divergence | Data consistency | Concurrent Acquire/Release ordering conflict returns stale memory value. |
 
 Relevant files:
 
