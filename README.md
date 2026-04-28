@@ -5,9 +5,23 @@
 
 ---
 
+## Results
+
+This repository corresponds to the paper's counterexample-first bug-hunting workflow and keeps the case-study artifacts in a directly reproducible layout.
+
+### Reported Highlights
+
+1. On XiangShan CoupledL2, the campaign triggers 12 actionable counterexamples under the configured budget.
+2. Triggered failures span progress stall/deadlock, data consistency, and protocol-state legality categories.
+3. The same workflow is transferred to RocketChip InclusiveCache with mechanical adaptation at the harness/property integration layer.
+
+The repository datasets (cause notes, traces, waveforms, and assertion locations) are structured to support replay, diagnosis, and fix validation across the two case studies.
+
 **Contents**
 
 - [CoupledL2 Verification](#coupledl2-verification)
+  - [Results](#results)
+    - [Reported Highlights](#reported-highlights)
   - [Overview](#overview)
     - [Current Snapshot Organization](#current-snapshot-organization)
   - [Repository Structure](#repository-structure)
@@ -26,8 +40,6 @@
     - [Code Location Mapping](#code-location-mapping)
   - [Dataset](#dataset)
     - [Critical Errors](#critical-errors)
-  - [Results](#results)
-    - [Reported Highlights](#reported-highlights)
 
 ---
 
@@ -373,14 +385,3 @@ Non-paper auxiliary assertions (internal MSHR/dir sanity groups) were removed fr
 
 ---
 
-## Results
-
-This repository corresponds to the paper's counterexample-first bug-hunting workflow and keeps the case-study artifacts in a directly reproducible layout.
-
-### Reported Highlights
-
-1. On XiangShan CoupledL2, the campaign triggers 12 actionable counterexamples under the configured budget.
-2. Triggered failures span progress stall/deadlock, data consistency, and protocol-state legality categories.
-3. The same workflow is transferred to RocketChip InclusiveCache with mechanical adaptation at the harness/property integration layer.
-
-The repository datasets (cause notes, traces, waveforms, and assertion locations) are structured to support replay, diagnosis, and fix validation across the two case studies.
