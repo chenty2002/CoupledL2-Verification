@@ -70,42 +70,23 @@ This repository contains two case studies:
 ```text
 .
 |- code
-|  |- RocketChip-InclusiveCache
-|  |  |- Chisel
-|  |  |- Verilog
-|  |  `- inclusivecache-verification
-|  |- XiangShan-CoupledL2-copy_equality
-|  |  |- Chisel
-|  |  |- Verilog
-|  |  |- cause.txt
-|  |  `- XiangShan-CoupledL2-copy_equality.fst
-|  |- XiangShan-CoupledL2-write_read
-|  |  |- Chisel
-|  |  |- Verilog
-|  |  |- cause.txt
-|  |  `- XiangShan-CoupledL2-write_read-1017.fst
-|  |- XiangShan-CoupledL2-peer-l2
-|  |  |- Chisel
-|  |  |- Verilog
-|  |  |- cause.txt
-|  |  `- XiangShan-CoupledL2-peer-l2.fst
-|  |- XiangShan-CoupledL2-Native-L1
-|  |  |- Chisel
-|  |  `- Verilog
-|  `- XiangShan-CoupledL2-TL-Test
-|     |- configs
-|     |- dut
-|     |- main
-|     `- scripts
-|  |- XiangShan-CoupledL2-deadlock-v0
-|  |  |- Chisel
-|  |  |- Verilog
-|  |  |- cause.txt
-|  |  `- XiangShan-CoupledL2-deadlock-v0.fst
-|  |- XiangShan-CoupledL2-deadlock-v1
-|  |- XiangShan-CoupledL2-deadlock-v2
-|  |- XiangShan-CoupledL2-deadlock-v3
-|  `- XiangShan-CoupledL2-deadlock-v4
+|  |- CaseStudy_1
+|  |  |- XiangShan-CoupledL2-copy_equality
+|  |  |- XiangShan-CoupledL2-write_read
+|  |  |- XiangShan-CoupledL2-peer-l2
+|  |  |- XiangShan-CoupledL2-Native-L1
+|  |  |- XiangShan-CoupledL2-TL-Test
+|  |  |- XiangShan-CoupledL2-deadlock-v0
+|  |  |- XiangShan-CoupledL2-deadlock-v1
+|  |  |- XiangShan-CoupledL2-deadlock-v2
+|  |  |- XiangShan-CoupledL2-deadlock-v3
+|  |  `- XiangShan-CoupledL2-deadlock-v4
+|  |- CaseStudy_2
+|  |  `- RocketChip-InclusiveCache
+|  |     |- Chisel
+|  |     |- Verilog
+|  |     `- inclusivecache-verification
+|  `- preprocess_sva.py
 |- figures
 |  |- deadlock-1.png
 |  |- deadlock-2.png
@@ -136,7 +117,7 @@ Each XiangShan version directory is self-contained with Chisel, Verilog, and an 
 
 ### TL-Test Toolchain Additions
 
-The TL-Test ablation (`code/XiangShan-CoupledL2-TL-Test`) needs a larger toolchain than the formal-only flow:
+The TL-Test ablation (`code/CaseStudy_1/XiangShan-CoupledL2-TL-Test`) needs a larger toolchain than the formal-only flow:
 
 | Tool | Purpose |
 | --- | --- |
@@ -147,7 +128,7 @@ The TL-Test ablation (`code/XiangShan-CoupledL2-TL-Test`) needs a larger toolcha
 | C++17 compiler (`g++` or `clang++`) | Compile the TL-Test host and generated Verilator code |
 | sqlite3 development library | Linked by the TL-Test host build (`-lsqlite3`) |
 
-The root `make tltest ...` entry checks for `python`, `mill`, `verilator`, and `cmake`. If your Verilator install lives in a non-default location, TL-Test also supports `VERILATOR_INCLUDE`, `CXX_COMPILER`, and `SQLITE3_ROOT`; see `code/XiangShan-CoupledL2-TL-Test/Makefile`.
+The root `make tltest ...` entry checks for `python`, `mill`, `verilator`, and `cmake`. If your Verilator install lives in a non-default location, TL-Test also supports `VERILATOR_INCLUDE`, `CXX_COMPILER`, and `SQLITE3_ROOT`; see `code/CaseStudy_1/XiangShan-CoupledL2-TL-Test/Makefile`.
 
 ### Root Makefile Checks
 
@@ -200,7 +181,7 @@ make verify 8
 Direct local flow example:
 
 ```bash
-cd code/XiangShan-CoupledL2-write_read/Chisel
+cd code/CaseStudy_1/XiangShan-CoupledL2-write_read/Chisel
 make auto
 cd ../Verilog
 ./setup.sh VerifyTop*.sv
@@ -246,19 +227,19 @@ Section 6 of `main.tex` evaluates the full XiangShan workflow against five compa
 
 | Paper configuration | Repository support | How to run / inspect | Notes |
 | --- | --- | --- | --- |
-| `our workflow` | Main XiangShan cases under `code/XiangShan-CoupledL2-*` | `make verify <index>` | Uses Simplified L1, reduced parameters, synchronization modules, and bounded liveness checks. |
-| `baseline (TL-Test)` | `code/XiangShan-CoupledL2-TL-Test` | `make tltest <case-or-index>` | Simulation-only comparison under the same case selection. |
+| `our workflow` | Main XiangShan cases under `code/CaseStudy_1/XiangShan-CoupledL2-*` | `make verify <index>` | Uses Simplified L1, reduced parameters, synchronization modules, and bounded liveness checks. |
+| `baseline (TL-Test)` | `code/CaseStudy_1/XiangShan-CoupledL2-TL-Test` | `make tltest <case-or-index>` | Simulation-only comparison under the same case selection. |
 | `w/o parameter reduction` | Same XiangShan case directories | `make verify <index> VERIFY_MODE=large` | `VERIFY_MODE=large` switches from the reduced verification profile back to the development-scale parameter setting described in the paper. |
 | `w/o bounded liveness as safety primitive` | Deadlock cases plus `code/preprocess_sva.py` | `make verify <deadlock-index> VERIFY_ABLATION=wo-bounded-liveness` | `preprocess_sva.py` rewrites generated bounded timer assertions into unbounded SVA eventuality checks for this ablation. |
-| `w/o Simplified L1` | `code/XiangShan-CoupledL2-Native-L1` | `make native-l1` | Replaces the paper's Simplified L1 boundary model with a `NativeL1` package derived from XiangShan's original L1-side behavior. |
+| `w/o Simplified L1` | `code/CaseStudy_1/XiangShan-CoupledL2-Native-L1` | `make native-l1` | Replaces the paper's Simplified L1 boundary model with a `NativeL1` package derived from XiangShan's original L1-side behavior. |
 | `w/o synchronization modules` | No standalone runnable target in this snapshot | Text-only description | This removal disables the auxiliary synchronized observation mirrors, so state/data-aware checks become uncheckable even though progress checks still conceptually remain. |
 
 About the code layout for these ablations:
 
-1. `code/XiangShan-CoupledL2-TL-Test` is the simulation baseline used for the TL-Test comparison in `main.tex`.
+1. `code/CaseStudy_1/XiangShan-CoupledL2-TL-Test` is the simulation baseline used for the TL-Test comparison in `main.tex`.
 2. `VERIFY_MODE=small|large` is the switch used to move between the reduced formal profile and the development-value profile for the parameter-reduction ablation.
 3. `code/preprocess_sva.py` implements the bounded-liveness removal by post-processing generated Verilog assertions in the deadlock cases.
-4. `code/XiangShan-CoupledL2-Native-L1` contains the Native-L1 harness used for the `w/o Simplified L1` comparison.
+4. `code/CaseStudy_1/XiangShan-CoupledL2-Native-L1` contains the Native-L1 harness used for the `w/o Simplified L1` comparison.
 5. The `w/o Sync Modules` row is documented for correspondence with the paper, but no separate runnable artifact is provided here because the removal intentionally breaks the observability support needed by the relevant properties.
 
 ---
@@ -288,12 +269,12 @@ The repository code stores these reductions as harness-level knobs (`if (useLarg
 
 | Parameter | Representative code location(s) | How it is encoded |
 | --- | --- | --- |
-| ways / sets / blockBytes / mshrs (L2/L3) | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `L2Param(...)` and `HCCacheParameters(...)` use `if (useLarge) ... else ...`, where the `else` branch is the reduced verification profile. |
-| ways / sets / blockBytes | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `MessageGeneratorParam(...)` uses `if (useLarge) ... else ...` to reduce request-space complexity for formal runs. |
-| banks | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` and `code/XiangShan-CoupledL2-copy_equality/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `case huancun.BankBitsKey => 0` enforces a single-bank setting for verification. |
-| busWidth | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala`, `code/XiangShan-CoupledL2-write_read/Chisel/src/main/scala/coupledL2/tl2tl/TL2TLCoupledL2.scala` | Reduced bus width is reflected via `TLChannelBeatBytes(if (useLarge) 32 else 1)` and `beatBytes = (if env VERIFY_MODE=large then 32 else 1)`. |
-| address bits | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `TLRAM(AddressSet(0, if (useLarge) 0xffffffL else 0x1fL), ...)` corresponds to 24-bit vs 5-bit address space. |
-| size mode switch | `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala`, `code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/AutoVerify.scala` | `VERIFY_MODE` selects small/large. |
+| ways / sets / blockBytes / mshrs (L2/L3) | `code/CaseStudy_1/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `L2Param(...)` and `HCCacheParameters(...)` use `if (useLarge) ... else ...`, where the `else` branch is the reduced verification profile. |
+| ways / sets / blockBytes | `code/CaseStudy_1/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `MessageGeneratorParam(...)` uses `if (useLarge) ... else ...` to reduce request-space complexity for formal runs. |
+| banks | `code/CaseStudy_1/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` and `code/CaseStudy_1/XiangShan-CoupledL2-copy_equality/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `case huancun.BankBitsKey => 0` enforces a single-bank setting for verification. |
+| busWidth | `code/CaseStudy_1/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala`, `code/CaseStudy_1/XiangShan-CoupledL2-write_read/Chisel/src/main/scala/coupledL2/tl2tl/TL2TLCoupledL2.scala` | Reduced bus width is reflected via `TLChannelBeatBytes(if (useLarge) 32 else 1)` and `beatBytes = (if env VERIFY_MODE=large then 32 else 1)`. |
+| address bits | `code/CaseStudy_1/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala` | `TLRAM(AddressSet(0, if (useLarge) 0xffffffL else 0x1fL), ...)` corresponds to 24-bit vs 5-bit address space. |
+| size mode switch | `code/CaseStudy_1/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala`, `code/CaseStudy_1/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/AutoVerify.scala` | `VERIFY_MODE` selects small/large. |
 
 ---
 
@@ -303,14 +284,14 @@ The repository code stores these reductions as harness-level knobs (`if (useLarg
 
 | Case Directory | Suggested Critical Error Name | Bug Category | Cause Summary |
 | --- | --- | --- | --- |
-| code/XiangShan-CoupledL2-deadlock-v0 | Deadlock Freeness - Probe Starvation | Progress stall/deadlock freeness | Continuous same-address prefetch blocks Probe admission; circular wait forms. |
-| code/XiangShan-CoupledL2-deadlock-v1 | Deadlock Freeness - Replacement Conflict I | Progress stall/deadlock freeness | Same-set X/Y interaction plus replacement and Probe interlock leads to deadlock. |
-| code/XiangShan-CoupledL2-deadlock-v2 | Deadlock Freeness - Replacement Conflict II | Progress stall/deadlock freeness | Same root cause family as v1 and v2, reproduced in another version point. |
-| code/XiangShan-CoupledL2-deadlock-v3 | Deadlock Freeness - High Same-Set Contention | Progress stall/deadlock freeness | Too many same-set lines saturate ways; replacement and Probe dependency deadlocks. |
-| code/XiangShan-CoupledL2-deadlock-v4 | Deadlock Freeness - Bounded-Latency Mismatch | Progress stall/deadlock freeness | HuanCun parallelism bottleneck cannot satisfy a 200-cycle completion budget. |
-| code/XiangShan-CoupledL2-peer-l2 | Protocol-State Legality - Peer L2 Tip-Branch Conflict | Protocol-state legality | Probe may be accepted before ReleaseAck ordering is fully respected, creating illegal peer state combination. |
-| code/XiangShan-CoupledL2-copy_equality | Data Consistency - Copy Equality Update Race | Data consistency | Near-simultaneous ProbeAck and ReleaseData causes dirty data update race. |
-| code/XiangShan-CoupledL2-write_read | Data Consistency - Write-Read Divergence | Data consistency | Concurrent Acquire/Release ordering conflict returns stale memory value. |
+| code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v0 | Deadlock Freeness - Probe Starvation | Progress stall/deadlock freeness | Continuous same-address prefetch blocks Probe admission; circular wait forms. |
+| code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v1 | Deadlock Freeness - Replacement Conflict I | Progress stall/deadlock freeness | Same-set X/Y interaction plus replacement and Probe interlock leads to deadlock. |
+| code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v2 | Deadlock Freeness - Replacement Conflict II | Progress stall/deadlock freeness | Same root cause family as v1 and v2, reproduced in another version point. |
+| code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v3 | Deadlock Freeness - High Same-Set Contention | Progress stall/deadlock freeness | Too many same-set lines saturate ways; replacement and Probe dependency deadlocks. |
+| code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v4 | Deadlock Freeness - Bounded-Latency Mismatch | Progress stall/deadlock freeness | HuanCun parallelism bottleneck cannot satisfy a 200-cycle completion budget. |
+| code/CaseStudy_1/XiangShan-CoupledL2-peer-l2 | Protocol-State Legality - Peer L2 Tip-Branch Conflict | Protocol-state legality | Probe may be accepted before ReleaseAck ordering is fully respected, creating illegal peer state combination. |
+| code/CaseStudy_1/XiangShan-CoupledL2-copy_equality | Data Consistency - Copy Equality Update Race | Data consistency | Near-simultaneous ProbeAck and ReleaseData causes dirty data update race. |
+| code/CaseStudy_1/XiangShan-CoupledL2-write_read | Data Consistency - Write-Read Divergence | Data consistency | Concurrent Acquire/Release ordering conflict returns stale memory value. |
 
 Relevant files:
 
@@ -346,14 +327,14 @@ Notes:
 
 | Version / case | Primary assertion location | Covered bug scope |
 | --- | --- | --- |
-| XiangShan-CoupledL2-copy_equality | code/XiangShan-CoupledL2-copy_equality/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala | Data consistency |
-| XiangShan-CoupledL2-write_read | code/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala | Data consistency + protocol constraints |
-| XiangShan-CoupledL2-peer-l2 | code/XiangShan-CoupledL2-peer-l2/Chisel/src/test/scala/coupledL2/VerifyTop.scala | Protocol-state legality |
-| XiangShan-CoupledL2-deadlock-v0 | code/XiangShan-CoupledL2-deadlock-v0/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
-| XiangShan-CoupledL2-deadlock-v1 | code/XiangShan-CoupledL2-deadlock-v1/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
-| XiangShan-CoupledL2-deadlock-v2 | code/XiangShan-CoupledL2-deadlock-v2/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
-| XiangShan-CoupledL2-deadlock-v3 | code/XiangShan-CoupledL2-deadlock-v3/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
-| XiangShan-CoupledL2-deadlock-v4 | code/XiangShan-CoupledL2-deadlock-v4/Chisel/src/main/scala/coupledL2/tl2tl/MSHRCtl.scala | Progress stall/deadlock freeness |
+| XiangShan-CoupledL2-copy_equality | code/CaseStudy_1/XiangShan-CoupledL2-copy_equality/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala | Data consistency |
+| XiangShan-CoupledL2-write_read | code/CaseStudy_1/XiangShan-CoupledL2-write_read/Chisel/src/test/scala/coupledL2Verification/VerifyTop.scala | Data consistency + protocol constraints |
+| XiangShan-CoupledL2-peer-l2 | code/CaseStudy_1/XiangShan-CoupledL2-peer-l2/Chisel/src/test/scala/coupledL2/VerifyTop.scala | Protocol-state legality |
+| XiangShan-CoupledL2-deadlock-v0 | code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v0/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
+| XiangShan-CoupledL2-deadlock-v1 | code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v1/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
+| XiangShan-CoupledL2-deadlock-v2 | code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v2/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
+| XiangShan-CoupledL2-deadlock-v3 | code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v3/Chisel/src/main/scala/coupledL2/MSHRCtl.scala | Progress stall/deadlock freeness |
+| XiangShan-CoupledL2-deadlock-v4 | code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v4/Chisel/src/main/scala/coupledL2/tl2tl/MSHRCtl.scala | Progress stall/deadlock freeness |
 
 Important deadlock note:
 
@@ -369,7 +350,7 @@ Important deadlock note:
 
 InclusiveCache paper-related assertions have been migrated into the real project verification entry:
 
-1. code/RocketChip-InclusiveCache/Chisel/inclusivecache-verification/src/test/scala/TestTop.scala
+1. code/CaseStudy_2/RocketChip-InclusiveCache/Chisel/inclusivecache-verification/src/test/scala/TestTop.scala
 
 Current retained property groups in that TestTop are paper-scoped only:
 
@@ -384,4 +365,3 @@ Non-paper auxiliary assertions (internal MSHR/dir sanity groups) were removed fr
 </details>
 
 ---
-
