@@ -1,27 +1,61 @@
 """Deadlock / stall dependency-graph builder for CoupledL2-based FST waveforms.
 
-This script is self-contained.  It:
+Compared with the earlier hard-coded edition, this analyzer derives its
+rule base directly from the design rather than from Python literals, so
+that minor Chisel commits (renamed FSM bits, added cache levels,
+retitled module instances) no longer break the analysis chain.  The
+three concrete extensions are:
 
-  1. Opens an FST waveform.
-  2. Auto-discovers every MSHR instance under every cache slice that follows
-     the ``*.slices_<n>.mshrCtl.mshrs_<i>`` convention used by XiangShan's
-     CoupledL2 / CoupledL2AsL1 modules.
-  3. Replays the FST and records, for every MSHR and every time step, the
-     value of the FSM scheduling bits (``state.s_*``), waiting bits
-     (``state.w_*``), the externally visible ``io_msInfo_*`` / ``io_status_*``
-     fields plus the low-level response / task handshake signals that are
-     relevant for dependency resolution.
-  4. Picks a "stall window" (end of simulation) and, for each MSHR that is
-     still ``req_valid`` but not ``will_free`` at that time, builds a
-     directed "wait-for" graph whose nodes include MSHRs, the per-cache
-     Directory, the per-cache SinkB / SourceB channels, and MainPipe stages.
-     Edges are created from each unresolved ``w_*`` or blocked ``s_*`` bit
-     according to the static Chisel-derived rule base encoded below.
-  5. Finds all simple cycles in that graph.  A non-empty cycle set is the
-     canonical evidence of a (live)lock; an empty set (pure DAG) indicates a
-     one-way stall or input starvation.
-  6. Emits ``deadlock_graph.dot`` (render with ``dot -Tpng``) and a textual
-     report on stdout.
+  1. **Schema discovery** — parse the design's FIRRTL (when available)
+     and extract, for every MSHR module, the *exact* set of
+     ``state.s_*`` / ``state.w_*`` register fields and the boolean
+     expression of ``will_free``.  When FIRRTL is unavailable the
+     analyzer falls back to a built-in schema bundled in
+     :func:`builtin_coupledl2_schema`.
+  2. **Driver provenance mining** — for every FSM bit, walk the FIRRTL
+     ``state.<bit> <= ...`` assignment and the ``when (...) :`` context
+     that guards it, then attribute the clearing event to its driver
+     port (``io.resps.sink_d.*``, ``io.replResp.*``, etc.).  The
+     resulting :class:`DriverInfo` is what tells the analyzer "a zero on
+     ``state_w_replResp`` means we are waiting on the local Directory" —
+     no Python-side hard-coding required.
+  3. **Topology inference** — open the FST, enumerate every module
+     instance whose path matches one of the schema's MSHR regexes, turn
+     that into the cache pool, and infer parent/child links between
+     caches by matching cache-label conventions plus the schema's
+     instance map.  The classic L1/L2/L3 hierarchy emerges without any
+     hand-written ``_peer_cache`` table.
+
+Pipeline:
+
+  1. Discover the schema and driver-provenance map (steps 1+2 above).
+  2. Open the FST, enumerate cache instances, and infer the topology
+     (step 3 above).
+  3. Replay — for each MSHR, freeze the final value of every signal
+     declared in the schema.
+  4. Stall set + edge synthesis — compute the stalled set ``Σ`` and
+     emit edges per the existing wait/sched resolvers.  Specialised
+     hand-written resolvers take priority; bits that are *new* in this
+     commit and have no specialised resolver fall back on a *generic
+     resolver* synthesised from the driver-provenance map (so the cycle
+     remains closeable instead of being silently dropped).
+  5. Rule-coverage telemetry — at the end, the analyzer emits a per-bit
+     trigger count and flags every stalled MSHR with zero out-degree as
+     a hard error.  CI can wire this up as a gate to detect rule decay
+     within the same commit that introduces it.
+
+The original CLI behaviour (``--fst``/``--dot``/``--png``) is preserved.
+New flags:
+
+  --firrtl PATH   path to a Chisel/FIRRTL ``*.fir`` file used for
+                  schema and driver-provenance discovery; if omitted
+                  the analyzer auto-detects one near the FST and falls
+                  back to a built-in schema if none is found.
+  --no-auto       disable the auto-discovery pipeline entirely and use
+                  the bundled hard-coded rule base (matches the legacy
+                  behaviour).
+  --strict        exit with non-zero status if any stalled MSHR has
+                  zero out-degree (CI gate against rule decay).
 """
 
 from __future__ import annotations
@@ -44,22 +78,73 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Configuration ---------------------------------------------------------------
+# Schema discovery and driver provenance --------------------------------------
 # ---------------------------------------------------------------------------
 
-# All "stateful" per-MSHR signals we need for dependency resolution.  The
-# trailing ``" [n:0]"`` is stripped transparently when we look them up.
-SCHEDULING_BITS = [
-    "state_s_acquire", "state_s_rprobe", "state_s_pprobe",
-    "state_s_probeack", "state_s_refill", "state_s_release", "state_s_retry",
+# Map from FIRRTL port-name fragments to (driver_kind, channel, direction).
+# These fragments are *structural* (matching TileLink's wire naming, not
+# any user-given name), so they do not need to be revisited per-commit.
+DRIVER_PORT_PATTERNS: List[Tuple["re.Pattern", Tuple[str, Optional[str], Optional[str]]]] = [
+    (re.compile(r"io\.resps\.sink_d\."),    ("channel", "D", "in")),
+    (re.compile(r"io\.resps\.sink_c\."),    ("channel", "C", "in")),
+    (re.compile(r"io\.resps\.sink_e\."),    ("channel", "E", "in")),
+    (re.compile(r"io\.replResp\."),         ("directory", None, None)),
+    (re.compile(r"io\.tasks\.source_a\."),  ("channel", "A", "out")),
+    (re.compile(r"io\.tasks\.source_b\."),  ("channel", "B", "out")),
+    (re.compile(r"io\.tasks\.source_c\."),  ("channel", "C", "out")),
+    (re.compile(r"io\.tasks\.source_d\."),  ("pipeline", "sourceD", None)),
+    (re.compile(r"io\.tasks\.source_e\."),  ("channel", "E", "out")),
+    (re.compile(r"io\.tasks\.mainpipe\."),  ("pipeline", "mainpipe", None)),
+    (re.compile(r"io\.dirResult\."),        ("directory", None, None)),
+    (re.compile(r"io\.dir_write\."),        ("directory", None, None)),
+    (re.compile(r"io\.tag_write\."),        ("directory", None, None)),
+    (re.compile(r"io\.client_dir_write\."), ("directory", None, None)),
+    (re.compile(r"io\.client_tag_write\."), ("directory", None, None)),
+    (re.compile(r"io\.aMergeTask\."),       ("pipeline", "mainpipe", None)),
+    (re.compile(r"io\.nestedwb\."),         ("directory", None, None)),
 ]
-WAITING_BITS = [
-    "state_w_rprobeackfirst", "state_w_rprobeacklast",
-    "state_w_pprobeackfirst", "state_w_pprobeacklast", "state_w_pprobeack",
-    "state_w_grantfirst", "state_w_grantlast", "state_w_grant",
-    "state_w_releaseack", "state_w_replResp",
-]
-CONTEXT_FIELDS = [
+
+
+@dataclass
+class DriverInfo:
+    """How an FSM bit transitions to 1.
+
+    ``trigger_signals`` are the FIRRTL signal names appearing in the rhs
+    or in the enclosing ``when (...) :`` predicate of a
+    ``state.<bit> <= 1`` assignment.  ``kind``/``channel``/``direction``
+    are derived from those signals via :data:`DRIVER_PORT_PATTERNS`.
+    """
+    bit: str
+    kind: str = "unknown"
+    channel: Optional[str] = None
+    direction: Optional[str] = None
+    trigger_signals: List[str] = field(default_factory=list)
+    raw_rhs: List[str] = field(default_factory=list)
+
+
+@dataclass
+class Schema:
+    """The complete, version-specific shape of one cache family's MSHR FSM."""
+    family: str
+    mshr_path_re: "re.Pattern"
+    scheduling_bits: List[str]
+    waiting_bits: List[str]
+    will_free_terms: List[str]
+    guard_map: Dict[str, List[str]]
+    drivers: Dict[str, DriverInfo]
+    context_fields: List[str]
+    flat_prefix: str = "state_"
+
+    def all_bits(self) -> List[str]:
+        return self.scheduling_bits + self.waiting_bits
+
+    def all_signal_leaves(self) -> List[str]:
+        return list(dict.fromkeys(self.all_bits() + self.context_fields))
+
+
+# ---- Built-in schema (used when no FIRRTL is supplied) ----------------------
+
+_BUILTIN_CONTEXT_FIELDS = [
     "req_valid", "req_channel", "req_opcode", "req_param",
     "req_set", "req_tag", "req_sourceId",
     "dirResult_hit", "dirResult_tag", "dirResult_way",
@@ -71,21 +156,427 @@ CONTEXT_FIELDS = [
     "io_msInfo_bits_dirHit", "io_msInfo_bits_blockRefill",
     "io_msInfo_bits_needRelease", "io_msInfo_bits_nestB",
     "io_msInfo_bits_willFree",
-    # task & response ports (observed to corroborate graph edges)
     "io_tasks_source_a_valid", "io_tasks_source_a_ready",
     "io_tasks_source_b_valid", "io_tasks_source_b_ready",
     "io_tasks_mainpipe_valid", "io_tasks_mainpipe_ready",
     "io_resps_sink_c_valid", "io_resps_sink_d_valid",
     "io_replResp_valid", "io_replResp_bits_retry", "io_replResp_bits_way",
 ]
+
+_BUILTIN_DRIVER_HINTS = {
+    "state_w_replResp":       ("directory", None, None),
+    "state_w_grantfirst":     ("channel",   "D",  "in"),
+    "state_w_grantlast":      ("channel",   "D",  "in"),
+    "state_w_grant":          ("channel",   "D",  "in"),
+    "state_w_releaseack":     ("channel",   "D",  "in"),
+    "state_w_pprobeackfirst": ("channel",   "C",  "in"),
+    "state_w_pprobeacklast":  ("channel",   "C",  "in"),
+    "state_w_pprobeack":      ("channel",   "C",  "in"),
+    "state_w_rprobeackfirst": ("channel",   "C",  "in"),
+    "state_w_rprobeacklast":  ("channel",   "C",  "in"),
+    "state_s_acquire":        ("channel",   "A",  "out"),
+    "state_s_pprobe":         ("channel",   "B",  "out"),
+    "state_s_rprobe":         ("channel",   "B",  "out"),
+    "state_s_refill":         ("pipeline",  "mainpipe", None),
+    "state_s_release":        ("pipeline",  "mainpipe", None),
+    "state_s_probeack":       ("pipeline",  "mainpipe", None),
+    "state_s_retry":          ("pipeline",  "mainpipe", None),
+}
+
+
+def _builtin_drivers() -> Dict[str, DriverInfo]:
+    return {
+        bit: DriverInfo(bit=bit, kind=k, channel=ch, direction=d,
+                        trigger_signals=["<built-in>"])
+        for bit, (k, ch, d) in _BUILTIN_DRIVER_HINTS.items()
+    }
+
+
+def builtin_coupledl2_schema() -> Schema:
+    """Hand-written schema used when no FIRRTL is available."""
+    return Schema(
+        family="coupledl2-builtin",
+        mshr_path_re=re.compile(
+            r"^(?P<prefix>.+?\.slices_\d+\.mshrCtl)\.mshrs_(?P<idx>\d+)\.(?P<leaf>.+)$"),
+        scheduling_bits=[
+            "state_s_acquire", "state_s_rprobe", "state_s_pprobe",
+            "state_s_probeack", "state_s_refill", "state_s_release",
+            "state_s_retry",
+        ],
+        waiting_bits=[
+            "state_w_rprobeackfirst", "state_w_rprobeacklast",
+            "state_w_pprobeackfirst", "state_w_pprobeacklast", "state_w_pprobeack",
+            "state_w_grantfirst",     "state_w_grantlast",     "state_w_grant",
+            "state_w_releaseack",     "state_w_replResp",
+        ],
+        will_free_terms=[
+            "state_s_refill", "state_s_probeack", "state_s_release",
+            "state_w_rprobeacklast", "state_w_pprobeacklast",
+            "state_w_grantlast", "state_w_releaseack", "state_w_replResp",
+        ],
+        guard_map={
+            "state_s_refill":   ["state_w_grantlast", "state_w_rprobeacklast", "state_w_replResp"],
+            "state_s_release":  ["state_w_rprobeacklast", "state_w_grantlast", "state_w_replResp"],
+            "state_s_probeack": ["state_w_pprobeacklast"],
+        },
+        drivers=_builtin_drivers(),
+        context_fields=list(_BUILTIN_CONTEXT_FIELDS),
+        flat_prefix="state_",
+    )
+
+
+# ---- FIRRTL-based schema synthesis -----------------------------------------
+
+_MSHR_MODULE_HEADER_RE = re.compile(r"^\s*module\s+(MSHR(?:_\d+)?)\s*:\s*$")
+_MODULE_RE             = re.compile(r"^\s*module\s+(\S+)\s*:\s*$")
+_INST_RE               = re.compile(r"^\s*inst\s+(\S+)\s+of\s+(\S+)\s*(?:@\[.*\])?$")
+_REG_STATE_RE          = re.compile(
+    r"reg\s+state\s*:\s*\{(.+?)\},\s*clock", re.DOTALL)
+_BUNDLE_FIELD_RE       = re.compile(r"\b([sw]_[A-Za-z0-9]+)\s*:\s*UInt<1>")
+_STATE_ASSIGN_RE       = re.compile(r"^(\s+)state\.([sw]_[A-Za-z0-9]+)\s*<=\s*(.+?)\s*(?:@\[.*\])?$")
+_WHEN_RE               = re.compile(r"^(\s+)when\s+(.+?)\s*:\s*$")
+_NODE_WILL_FREE_RE     = re.compile(r"^\s*node\s+will_free\s*=\s*and\((\w+)\s*,\s*(\w+)\)")
+_NODE_AND_RE           = re.compile(r"^\s*node\s+(\w+)\s*=\s*and\((.+?)\)\s*(?:@\[.*\])?$")
+_NODE_EQ_RE            = re.compile(r"^\s*node\s+(\w+)\s*=\s*eq\(\s*(.+?)\s*,\s*UInt<1>\(\"h0\"\)\s*\)")
+_MP_GUARD_RE           = re.compile(r"^\s*node\s+(mp_(?:release|probeack|grant)_valid)\s*=\s*and\((.+?)\)\s*(?:@\[.*\])?$")
+
+
+def _extract_mshr_state_bundle(body: str) -> Optional[List[str]]:
+    """Return the list of ``s_*``/``w_*`` field names from
+    ``reg state : { ... }``."""
+    m = _REG_STATE_RE.search(body)
+    if not m:
+        return None
+    return [fm.group(1) for fm in _BUNDLE_FIELD_RE.finditer(m.group(1))]
+
+
+def _split_and_args(rhs: str) -> List[str]:
+    """Split the top-level args of an ``and(a, b, c)`` expression."""
+    if not rhs.startswith("and(") or not rhs.endswith(")"):
+        return [rhs]
+    inner = rhs[len("and("):-1]
+    depth = 0
+    buf: List[str] = []
+    out: List[str] = []
+    for ch in inner:
+        if ch == "(":
+            depth += 1; buf.append(ch)
+        elif ch == ")":
+            depth -= 1; buf.append(ch)
+        elif ch == "," and depth == 0:
+            out.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        out.append("".join(buf).strip())
+    return out
+
+
+def _resolve_node_chain(node_name: str, definitions: Dict[str, str],
+                        seen: Optional[Set[str]] = None) -> List[str]:
+    """Recursively flatten ``and(a, and(b, c))`` chains into a list of leaves."""
+    seen = seen or set()
+    if node_name in seen:
+        return [node_name]
+    seen.add(node_name)
+    rhs = definitions.get(node_name)
+    if rhs is None:
+        return [node_name]
+    rhs = rhs.strip()
+    if rhs.startswith("and("):
+        out: List[str] = []
+        for a in _split_and_args(rhs):
+            out.extend(_resolve_node_chain(a, definitions, seen))
+        return out
+    return [node_name]
+
+
+def _classify_driver(triggers: Iterable[str]) -> Tuple[str, Optional[str], Optional[str]]:
+    for sig in triggers:
+        for pat, info in DRIVER_PORT_PATTERNS:
+            if pat.search(sig):
+                return info
+    return ("unknown", None, None)
+
+
+def _scan_fir_file(path: str) -> Tuple[Optional[Schema], Dict[str, Dict[str, str]]]:
+    """Parse a FIRRTL file and synthesise a :class:`Schema`.
+
+    Returns ``(schema, instance_map)`` where ``instance_map`` is
+    ``{module_name -> {child_inst_name: child_module}}``.
+    """
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as err:
+        print(f"[schema] cannot read FIRRTL: {err}", file=sys.stderr)
+        return None, {}
+
+    # split into modules
+    modules: Dict[str, str] = {}
+    cur_mod: Optional[str] = None
+    cur_buf: List[str] = []
+    for line in text.splitlines():
+        m = _MODULE_RE.match(line)
+        if m:
+            if cur_mod is not None:
+                modules[cur_mod] = "\n".join(cur_buf)
+            cur_mod = m.group(1)
+            cur_buf = [line]
+        else:
+            cur_buf.append(line)
+    if cur_mod is not None:
+        modules[cur_mod] = "\n".join(cur_buf)
+
+    # instance map (used by topology layer)
+    instance_map: Dict[str, Dict[str, str]] = {}
+    for mod_name, body in modules.items():
+        children: Dict[str, str] = {}
+        for line in body.splitlines():
+            im = _INST_RE.match(line)
+            if im:
+                children[im.group(1)] = im.group(2)
+        instance_map[mod_name] = children
+
+    # find a representative MSHR module
+    mshr_mods = [n for n in modules if _MSHR_MODULE_HEADER_RE.match(f"  module {n} :")]
+    if not mshr_mods:
+        return None, instance_map
+
+    body = modules[mshr_mods[0]]
+    fields = _extract_mshr_state_bundle(body)
+    if not fields:
+        return None, instance_map
+
+    sched_bits = [f"state_{n}" for n in fields if n.startswith("s_")]
+    wait_bits  = [f"state_{n}" for n in fields if n.startswith("w_")]
+
+    # collect node-equality definitions for will_free / mp_*_valid resolution
+    node_defs: Dict[str, str] = {}
+    will_free_lhs: Optional[Tuple[str, str]] = None
+    mp_valids: Dict[str, str] = {}
+    for raw in body.splitlines():
+        m = _NODE_AND_RE.match(raw)
+        if m:
+            node_defs[m.group(1)] = "and(" + m.group(2) + ")"
+        m = _NODE_EQ_RE.match(raw)
+        if m:
+            node_defs[m.group(1)] = f"eq({m.group(2)},h0)"
+        m = _NODE_WILL_FREE_RE.match(raw)
+        if m:
+            will_free_lhs = (m.group(1), m.group(2))
+        m = _MP_GUARD_RE.match(raw)
+        if m:
+            mp_valids[m.group(1)] = m.group(2)
+
+    will_free_terms: List[str] = []
+    if will_free_lhs:
+        for op in will_free_lhs:
+            for t in _resolve_node_chain(op, node_defs):
+                if t.startswith("state."):
+                    will_free_terms.append("state_" + t.split(".", 1)[1])
+    if not will_free_terms:
+        # generic fallback
+        will_free_terms = [b for b in sched_bits if not b.endswith("_retry")]
+        will_free_terms += [b for b in wait_bits
+                            if "last" in b or b.endswith("releaseack") or b.endswith("replResp")]
+
+    guard_map: Dict[str, List[str]] = {}
+    sched_to_node = {
+        "state_s_release":  "mp_release_valid",
+        "state_s_probeack": "mp_probeack_valid",
+        "state_s_refill":   "mp_grant_valid",
+    }
+    for sbit, gnode in sched_to_node.items():
+        if gnode not in mp_valids:
+            continue
+        node_defs.setdefault(gnode, "and(" + mp_valids[gnode] + ")")
+        leaves = _resolve_node_chain(gnode, node_defs)
+        guards = ["state_" + l.split(".", 1)[1] for l in leaves if l.startswith("state.w_")]
+        if guards:
+            guard_map[sbit] = guards
+
+    # driver provenance: walk the body, track when-stack via indentation
+    drivers: Dict[str, DriverInfo] = {b: DriverInfo(bit=b) for b in sched_bits + wait_bits}
+    when_stack: List[Tuple[int, str]] = []
+    for raw in body.splitlines():
+        if not raw.strip():
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        while when_stack and indent <= when_stack[-1][0]:
+            when_stack.pop()
+        wm = _WHEN_RE.match(raw)
+        if wm:
+            when_stack.append((len(wm.group(1)), wm.group(2)))
+            continue
+        am = _STATE_ASSIGN_RE.match(raw)
+        if am:
+            full_bit = "state_" + am.group(2)
+            rhs = am.group(3)
+            preds = [p for _, p in when_stack]
+            sigs: List[str] = []
+            for t in list(preds) + [rhs]:
+                for s in re.finditer(r"io\.[A-Za-z0-9_.]+", t):
+                    sigs.append(s.group(0))
+            drv = drivers.setdefault(full_bit, DriverInfo(bit=full_bit))
+            drv.trigger_signals.extend(sigs)
+            drv.raw_rhs.append(rhs)
+
+    for bit, drv in drivers.items():
+        drv.trigger_signals = sorted(set(drv.trigger_signals))
+        kind, ch, direction = _classify_driver(drv.trigger_signals)
+        # If the FIRRTL gave no hint (e.g. pure state-only assignment),
+        # fall back to the built-in hint table so the bit still routes
+        # to a meaningful node.
+        if kind == "unknown" and bit in _BUILTIN_DRIVER_HINTS:
+            kind, ch, direction = _BUILTIN_DRIVER_HINTS[bit]
+        drv.kind = kind
+        drv.channel = ch
+        drv.direction = direction
+
+    # decide path-regex flavour from the instance map: a CoupledL2-style
+    # MSHR is instantiated *inside* an MSHRCtl module ("...mshrCtl.mshrs_N"),
+    # while a HuanCun-noninclusive MSHR sits directly in a Slice ("...ms_N").
+    parents_of: Dict[str, Set[str]] = defaultdict(set)
+    for parent_mod, kids in instance_map.items():
+        for _inst, child_mod in kids.items():
+            parents_of[child_mod].add(parent_mod)
+    has_mshrctl = any(p.startswith("MSHRCtl") for mshr_mod in mshr_mods
+                      for p in parents_of.get(mshr_mod, ()))
+    if has_mshrctl:
+        path_re = re.compile(
+            r"^(?P<prefix>.+?\.slices_\d+\.mshrCtl)\.mshrs_(?P<idx>\d+)\.(?P<leaf>.+)$")
+    else:
+        path_re = re.compile(
+            r"^(?P<prefix>.+?\.slices_\d+)\.ms_(?P<idx>\d+)\.(?P<leaf>.+)$")
+
+    schema = Schema(
+        family=f"coupledl2-fir({os.path.basename(path)})",
+        mshr_path_re=path_re,
+        scheduling_bits=sched_bits,
+        waiting_bits=wait_bits,
+        will_free_terms=sorted(set(will_free_terms)),
+        guard_map=guard_map,
+        drivers=drivers,
+        context_fields=list(_BUILTIN_CONTEXT_FIELDS),
+        flat_prefix="state_",
+    )
+    return schema, instance_map
+
+
+def auto_detect_firrtl(fst_path: str) -> Optional[str]:
+    """Best-effort search for a sibling ``VerifyTop.fir`` near ``fst_path``."""
+    fst_dir = os.path.dirname(os.path.abspath(fst_path))
+    search_roots = [fst_dir, os.path.dirname(fst_dir)]
+    for root in search_roots:
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, _, filenames in os.walk(root):
+            for fn in filenames:
+                if fn.endswith(".fir"):
+                    return os.path.join(dirpath, fn)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Topology inference ----------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Topology:
+    """Discovered cache hierarchy."""
+    parent_of: Dict[str, Optional[str]] = field(default_factory=dict)
+    children_of: Dict[str, List[str]] = field(default_factory=lambda: defaultdict(list))
+    raw: Dict[str, dict] = field(default_factory=dict)
+
+    def parent(self, cache: str) -> Optional[str]:
+        return self.parent_of.get(cache)
+
+    def children(self, cache: str) -> List[str]:
+        return list(self.children_of.get(cache, []))
+
+
+# Heuristic instance-name → cache-label rules (used as fallback / canonical
+# labelling).  More specific patterns first.
+_INSTANCE_NAME_RULES: List[Tuple["re.Pattern", str]] = [
+    (re.compile(r"^coupledL2AsL1(?:_(\d+))?$"),  "L1"),
+    (re.compile(r"^l1(?:_(\d+))?$"),              "L1"),
+    (re.compile(r"^coupledL2(?:_(\d+))?$"),       "L2"),
+    (re.compile(r"^l2(?:_(\d+))?$"),              "L2"),
+    (re.compile(r"^l3(?:_(\d+))?$"),              "L3"),
+    (re.compile(r"^huancun(?:_(\d+))?$"),         "L3"),
+]
+
+
+def _label_from_instance_name(inst: str) -> Optional[str]:
+    for pat, prefix in _INSTANCE_NAME_RULES:
+        m = pat.fullmatch(inst)
+        if m:
+            idx = m.group(1) if m.lastindex else None
+            return f"{prefix}_{idx if idx is not None else '0'}"
+    return None
+
+
+def _cache_label_from_base(base: str) -> str:
+    """Convert ``VerifyTop.coupledL2_1.slices_0.mshrCtl`` → ``L2_1`` etc."""
+    core = re.sub(r"\.slices_\d+(?:\.mshrCtl)?$", "", base)
+    core = core.split(".", 1)[-1] if "." in core else core
+    return _label_from_instance_name(core) or core
+
+
+def _infer_topology(pool: Dict[str, "CacheIndex"]) -> Topology:
+    """Infer parent/child links between caches based on canonical
+    ``L<level>_<index>`` labels (assigned by :func:`_cache_label_from_base`)."""
+    topo = Topology()
+    caches = sorted(pool.keys())
+    levels: Dict[int, List[str]] = defaultdict(list)
+    parsed: Dict[str, Tuple[int, int]] = {}
+    for c in caches:
+        m = re.fullmatch(r"L(\d+)_(\d+)", c)
+        if m:
+            lvl = int(m.group(1)); idx = int(m.group(2))
+            levels[lvl].append(c); parsed[c] = (lvl, idx)
+    if not levels:
+        for c in caches:
+            topo.parent_of[c] = None
+        return topo
+    sorted_lvls = sorted(levels.keys())
+    top_lvl = max(sorted_lvls)
+    for lvl in sorted_lvls:
+        upper = [u for u in sorted_lvls if u > lvl]
+        for c in levels[lvl]:
+            idx = parsed[c][1]
+            parent: Optional[str] = None
+            if upper:
+                up = upper[0]
+                same_idx = f"L{up}_{idx}"
+                if same_idx in pool:
+                    parent = same_idx
+                elif len(levels[up]) == 1:
+                    parent = levels[up][0]
+            topo.parent_of[c] = parent
+            if parent:
+                topo.children_of[parent].append(c)
+    for c in levels[top_lvl]:
+        topo.parent_of.setdefault(c, None)
+    topo.raw["levels"] = dict(levels)
+    return topo
+
+
+# ---------------------------------------------------------------------------
+# Backward-compat surface (kept so external callers / tests don't break) -----
+# ---------------------------------------------------------------------------
+
+# These are *snapshots* of the built-in schema for the rare consumer that
+# imported the names directly.  Internal code now goes through ``Schema``.
+_BUILTIN_SCHEMA = builtin_coupledl2_schema()
+SCHEDULING_BITS = list(_BUILTIN_SCHEMA.scheduling_bits)
+WAITING_BITS    = list(_BUILTIN_SCHEMA.waiting_bits)
+CONTEXT_FIELDS  = list(_BUILTIN_SCHEMA.context_fields)
 ALL_MSHR_FIELDS = SCHEDULING_BITS + WAITING_BITS + CONTEXT_FIELDS
-
-
-# Regex that matches the fully-qualified scope of a single MSHR instance in
-# CoupledL2's FST, e.g.
-#   VerifyTop.coupledL2AsL1.slices_0.mshrCtl.mshrs_3
-#   VerifyTop.coupledL2_1.slices_0.mshrCtl.mshrs_0
-MSHR_PATH_RE = re.compile(r"^(?P<prefix>.+?\.slices_\d+\.mshrCtl)\.mshrs_(?P<idx>\d+)\.(?P<leaf>.+)$")
+MSHR_PATH_RE    = _BUILTIN_SCHEMA.mshr_path_re
 
 
 # ---------------------------------------------------------------------------
@@ -98,6 +589,7 @@ class MSHRSnapshot:
     cache: str
     mshr_id: int
     fields: Dict[str, str] = field(default_factory=dict)
+    schema: Optional[Schema] = None    # injected at discovery time
 
     # ----- convenience accessors (return None if unknown) -----
     def bit(self, name: str) -> Optional[int]:
@@ -125,7 +617,19 @@ class MSHRSnapshot:
 
     @property
     def will_free(self) -> bool:
-        return self.bit("io_status_bits_will_free") == 1 or self.bit("io_msInfo_bits_willFree") == 1
+        # 1) prefer the design-exported will_free if present.
+        for f in ("io_status_bits_will_free", "io_msInfo_bits_willFree"):
+            v = self.bit(f)
+            if v == 1:
+                return True
+        # 2) reconstruct from the schema's will_free_terms (derived from
+        #    the FIRRTL ``will_free`` AND-chain) so commits that move or
+        #    rename the exported port still work.
+        if self.schema is not None and self.schema.will_free_terms:
+            terms = self.schema.will_free_terms
+            if all(self.bit(t) == 1 for t in terms):
+                return True
+        return False
 
     @property
     def is_stalled(self) -> bool:
@@ -163,67 +667,104 @@ class Edge:
 # FST scanning ----------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def discover_mshr_instances(signals) -> Dict[str, CacheIndex]:
-    """Walk signal names and group them by cache / MSHR id."""
+def discover_mshr_instances(signals, schemas: Optional[List[Schema]] = None
+                            ) -> Tuple[Dict[str, CacheIndex], Dict[str, Schema]]:
+    """Walk signal names and group them by cache / MSHR id.
+
+    When multiple schemas are active the first regex that matches a
+    signal wins for the corresponding cache.  Returns the cache pool and
+    a mapping ``cache_label -> schema`` so subsequent stages know which
+    bit set to read for each cache.
+    """
+    if schemas is None:
+        schemas = [_BUILTIN_SCHEMA]
     by_cache: Dict[str, CacheIndex] = {}
+    cache_to_schema: Dict[str, Schema] = {}
     for full in signals.by_name:
-        m = MSHR_PATH_RE.match(full)
-        if not m:
-            continue
-        base = m.group("prefix")
-        idx = int(m.group("idx"))
-        label = _cache_label_of(base)
-        ci = by_cache.setdefault(label, CacheIndex(cache=label, base=base))
-        ci.mshrs.setdefault(idx, MSHRSnapshot(cache=label, mshr_id=idx))
-    return by_cache
+        for sch in schemas:
+            m = sch.mshr_path_re.match(full)
+            if not m:
+                continue
+            base = m.group("prefix")
+            idx = int(m.group("idx"))
+            label = _cache_label_from_base(base)
+            ci = by_cache.setdefault(label, CacheIndex(cache=label, base=base))
+            snap = ci.mshrs.setdefault(
+                idx, MSHRSnapshot(cache=label, mshr_id=idx, schema=sch))
+            if snap.schema is None:
+                snap.schema = sch
+            cache_to_schema[label] = sch
+            break
+    return by_cache, cache_to_schema
 
 
 def _cache_label_of(base: str) -> str:
-    """Turn ``VerifyTop.coupledL2AsL1.slices_0.mshrCtl`` into ``L1_0``, etc."""
-    # Strip slices_N.mshrCtl
-    core = base
-    core = re.sub(r"\.slices_\d+\.mshrCtl$", "", core)
-    core = core.split(".", 1)[-1]   # drop 'VerifyTop'
-    # coupledL2AsL1[_N] -> L1_N    (N defaults to 0 when absent)
-    m = re.fullmatch(r"coupledL2AsL1(?:_(\d+))?", core)
-    if m:
-        return f"L1_{m.group(1) or '0'}"
-    m = re.fullmatch(r"coupledL2(?:_(\d+))?", core)
-    if m:
-        return f"L2_{m.group(1) or '0'}"
-    return core
+    """Backward-compatible wrapper around :func:`_cache_label_from_base`."""
+    return _cache_label_from_base(base)
 
 
-def build_handle_table(fst, by_cache: Dict[str, CacheIndex], signals):
+def build_handle_table(fst, by_cache: Dict[str, CacheIndex], signals,
+                       cache_to_schema: Optional[Dict[str, Schema]] = None):
     """Map FST handles to ``(cache_label, mshr_id, leaf_signal)``."""
     table: Dict[int, Tuple[str, int, str]] = {}
+    sig_names = sorted(signals.by_name.keys())
+    cache_to_schema = cache_to_schema or {}
     for ci in by_cache.values():
+        sch = cache_to_schema.get(ci.cache, _BUILTIN_SCHEMA)
+        # Decide the per-MSHR scope prefix from the schema's regex flavour.
+        if "ms_(" in sch.mshr_path_re.pattern and ".mshrCtl" not in sch.mshr_path_re.pattern:
+            inst_word = "ms_"
+        else:
+            inst_word = "mshrs_"
+        leaves = sch.all_signal_leaves()
         for mi in ci.mshrs:
-            prefix = f"{ci.base}.mshrs_{mi}."
-            for leaf in ALL_MSHR_FIELDS:
-                exact = prefix + leaf
-                sig = signals.by_name.get(exact)
-                if sig is None:
+            prefix = f"{ci.base}.{inst_word}{mi}."
+            for leaf in leaves:
+                leaf_candidates = [leaf]
+                if leaf.startswith("state_"):
+                    leaf_candidates.append("state__" + leaf[len("state_"):])
+                sig = None
+                for cand in leaf_candidates:
+                    exact = prefix + cand
+                    sig = signals.by_name.get(exact)
+                    if sig is not None:
+                        break
                     # try with bracketed width suffix (e.g. " [2:0]")
-                    for name, s2 in signals.by_name.items():
-                        if name.startswith(exact) and name[len(exact):].startswith(" ["):
-                            sig = s2
+                    for name in sig_names:
+                        if not name.startswith(exact):
+                            continue
+                        rest = name[len(exact):]
+                        if rest.startswith(" [") or rest == "":
+                            sig = signals.by_name[name]
                             break
+                    if sig is not None:
+                        break
                 if sig is not None:
                     table[sig.handle] = (ci.cache, mi, leaf)
     return table
 
 
-def replay_fst(fst_path: str) -> Tuple[Dict[str, CacheIndex], int, Dict[Tuple[str, int, str], List[Tuple[int, str]]]]:
-    """Replay the waveform; return (cache index, end_time, per-signal traces)."""
+def replay_fst(fst_path: str, schemas: Optional[List[Schema]] = None
+               ) -> Tuple[Dict[str, CacheIndex], int,
+                          Dict[Tuple[str, int, str], List[Tuple[int, str]]],
+                          Dict[str, Schema]]:
+    """Replay the waveform; return ``(pool, end_time, traces, cache->schema)``.
+
+    The fourth tuple element is new in the auto-discovery edition;
+    legacy callers that unpack only three elements should switch to
+    keyword unpacking or accept a `_traces, _schemas` pair.
+    """
+    if schemas is None:
+        schemas = [_BUILTIN_SCHEMA]
     fst = lib.fstReaderOpen(fst_path.encode())
     if fst == ffi.NULL:
         sys.exit(f"[fatal] could not open FST: {fst_path}")
     _, signals = pf.get_scopes_signals2(fst)
-    by_cache = discover_mshr_instances(signals)
-    handle_table = build_handle_table(fst, by_cache, signals)
+    by_cache, cache_to_schema = discover_mshr_instances(signals, schemas)
+    handle_table = build_handle_table(fst, by_cache, signals, cache_to_schema)
     if not handle_table:
-        sys.exit("[fatal] no MSHR signals found; is the FST path correct?")
+        regexes = ", ".join(s.mshr_path_re.pattern for s in schemas)
+        sys.exit(f"[fatal] no MSHR signals found; tried regexes: {regexes}")
 
     lib.fstReaderSetFacProcessMaskAll(fst)
 
@@ -244,13 +785,12 @@ def replay_fst(fst_path: str) -> Tuple[Dict[str, CacheIndex], int, Dict[Tuple[st
     pf.fstReaderIterBlocks2(fst, cb, cb_vl)
     end_time = lib.fstReaderGetEndTime(fst)
 
-    # Freeze final snapshots
     for handle, (cache, mi, leaf) in handle_table.items():
         val = latest.get(handle, (0, "x"))[1]
         by_cache[cache].mshrs[mi].fields[leaf] = val
 
     lib.fstReaderClose(fst)
-    return by_cache, int(end_time), traces
+    return by_cache, int(end_time), traces, cache_to_schema
 
 
 # ---------------------------------------------------------------------------
@@ -282,19 +822,42 @@ def _same_cache_mshrs(ci: CacheIndex) -> List[MSHRSnapshot]:
     return [ci.mshrs[i] for i in sorted(ci.mshrs)]
 
 
-# ----- level / peer identification -----
+# ---------------------------------------------------------------------------
+# Analyzer context ------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
-def _peer_cache(cache: str) -> Optional[str]:
-    """Return the "other side" of a TileLink link for TL-message edges."""
-    # Topology assumption (verified against VerifyTop.scala):
-    #   L1_n <-> L2_n   (n in {0,1})
-    #   L2_n <-> L3     (L3 is out of visible scope; we leave it external)
+@dataclass
+class AnalyzerContext:
+    """Per-run analysis state shared across resolvers and reporters."""
+    topology: Topology
+    schemas: Dict[str, Schema]                   # cache_label -> schema
+    coverage: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    coverage_specialised: Set[str] = field(default_factory=set)
+    coverage_generic: Set[str] = field(default_factory=set)
+
+
+# ---------------------------------------------------------------------------
+# Rule-based resolvers --------------------------------------------------------
+# ---------------------------------------------------------------------------
+
+def _same_cache_mshrs(ci: CacheIndex) -> List[MSHRSnapshot]:
+    return [ci.mshrs[i] for i in sorted(ci.mshrs)]
+
+
+# ----- level / peer identification (now topology-driven) -----
+
+def _peer_cache(cache: str, ctx: Optional[AnalyzerContext] = None) -> Optional[str]:
+    """Return the upstream peer of ``cache``.
+
+    With topology inference enabled this delegates to the inferred
+    topology; the legacy hard-coded ``L1_n -> L2_n`` mapping is kept
+    only as a final fallback when no context is supplied.
+    """
+    if ctx is not None:
+        return ctx.topology.parent(cache)
     m = re.fullmatch(r"L1_(\d+)", cache)
     if m:
         return f"L2_{m.group(1)}"
-    m = re.fullmatch(r"L2_(\d+)", cache)
-    if m:
-        return None   # upstream is L3 but L3's MSHRs are HuanCun; out of model
     return None
 
 
@@ -320,11 +883,14 @@ def _find_target_mshr_by_set_tag(
 
 # ----- waiting-bit resolvers -----
 # Each resolver returns a list of ``Edge`` that originate from ``src``.
+# Resolvers accept an optional ``ctx`` so they can consult the inferred
+# topology; ``ctx=None`` keeps the legacy hard-coded behaviour.
 
-Resolver = Callable[[MSHRSnapshot, Dict[str, CacheIndex]], List[Edge]]
+Resolver = Callable[[MSHRSnapshot, Dict[str, CacheIndex], Optional[AnalyzerContext]], List[Edge]]
 
 
-def res_w_replResp(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]:
+def res_w_replResp(src: MSHRSnapshot, pool: Dict[str, CacheIndex],
+                   ctx: Optional[AnalyzerContext] = None) -> List[Edge]:
     """w_replResp = 0: Directory keeps issuing ``retry`` because every
     candidate way in the requested set is masked by some active MSHR's
     ``dirHit || blockRefill`` signal."""
@@ -332,8 +898,6 @@ def res_w_replResp(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]
     dir_node = directory_node(src.cache)
     edges = [Edge(src_node, dir_node, "w_replResp",
                   "Directory cannot pick a non-conflicting way")]
-    # All MSHRs in the same cache + same set that still hold the set are
-    # the concrete blockers of the replacer.
     my_set = src.int_of("req_set")
     if my_set is None:
         return edges
@@ -352,23 +916,12 @@ def res_w_replResp(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]
     return edges
 
 
-def res_w_grant(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]:
+def res_w_grant(src: MSHRSnapshot, pool: Dict[str, CacheIndex],
+                ctx: Optional[AnalyzerContext] = None) -> List[Edge]:
     """w_grant* = 0: waiting Grant/GrantData on sink_d.  The supplier is the
-    upstream peer cache (L2 for an L1 MSHR).  We model the shared TL-D bus
-    as one ``CH`` node per cache; concrete blockers upstream are:
-
-      * Any peer MSHR currently processing a Probe (``channel=B`` with
-        ``w_pprobeack*=0``) — it holds the D-channel because the peer
-        cannot simultaneously issue a Grant while an un-ack'd Probe is
-        outstanding (order-of-operations in MainPipe).
-      * Any peer MSHR on channel A that is itself stalled on a Grant from
-        further upstream (transitive back-pressure).
-
-    In both cases we draw an edge; set/tag comparison is *not* reliable
-    across cache levels because ``setBits`` differs, so we connect on the
-    structural fact "peer is busy and can't fire Grant toward us"."""
+    upstream peer cache (resolved via the inferred topology)."""
     src_node = mshr_node(src)
-    peer = _peer_cache(src.cache)
+    peer = _peer_cache(src.cache, ctx)
     edges: List[Edge] = [
         Edge(src_node, channel_node(src.cache, "D", "in"), "w_grant",
              "waiting on sink_d (Grant/GrantData from upstream)"),
@@ -376,7 +929,7 @@ def res_w_grant(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]:
     if peer is None or peer not in pool:
         edges.append(Edge(channel_node(src.cache, "D", "in"),
                           f"EXT::{src.cache}::upstream", "ext_grant",
-                          "upstream is L3/HuanCun (out of model)"))
+                          "upstream cache out of model"))
         return edges
     found = False
     for b in _same_cache_mshrs(pool[peer]):
@@ -402,142 +955,205 @@ def res_w_grant(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]:
     return edges
 
 
-def res_w_releaseack(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]:
+def res_w_releaseack(src: MSHRSnapshot, pool: Dict[str, CacheIndex],
+                     ctx: Optional[AnalyzerContext] = None) -> List[Edge]:
     """w_releaseack = 0: waiting ReleaseAck on sink_d from the upstream."""
-    src_node = mshr_node(src)
-    return [Edge(src_node, channel_node(src.cache, "D", "in"), "w_releaseack",
-                 "waiting on sink_d (ReleaseAck)")]
+    return [Edge(mshr_node(src), channel_node(src.cache, "D", "in"),
+                 "w_releaseack", "waiting on sink_d (ReleaseAck)")]
 
 
-def res_w_pprobe(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]:
+def res_w_pprobe(src: MSHRSnapshot, pool: Dict[str, CacheIndex],
+                 ctx: Optional[AnalyzerContext] = None) -> List[Edge]:
     """w_pprobeack* = 0: waiting ProbeAck on sink_c from downstream clients.
-    The missing ProbeAck is almost always caused by the downstream cache
-    rejecting / holding the Probe at its SinkB (addrConflict or replace
-    conflict) or by its own MSHR being unable to send ProbeAck."""
+
+    Downstream child caches are obtained from the inferred topology
+    when available, falling back to the legacy ``L2_n -> L1_n`` mapping.
+    """
     src_node = mshr_node(src)
     edges: List[Edge] = [Edge(src_node, channel_node(src.cache, "C", "in"),
                               "w_pprobe", "waiting on sink_c (ProbeAck)")]
-    # Which downstream cache should be responding?  It's the *child* of this
-    # cache in our topology; i.e. L2_n is waiting on L1_n.
-    m = re.fullmatch(r"L2_(\d+)", src.cache)
-    child = f"L1_{m.group(1)}" if m else None
-    if child is None or child not in pool:
+    # Resolve children via topology; fall back to the L2_n -> L1_n rule.
+    children: List[str]
+    if ctx is not None:
+        children = ctx.topology.children(src.cache)
+    else:
+        m = re.fullmatch(r"L2_(\d+)", src.cache)
+        children = [f"L1_{m.group(1)}"] if m else []
+    children = [c for c in children if c in pool]
+    if not children:
         edges.append(Edge(channel_node(src.cache, "C", "in"),
                           f"EXT::{src.cache}::child", "ext_probeack",
                           "no downstream cache modelled"))
         return edges
     my_set = src.int_of("req_set")
-    my_tag = src.int_of("req_tag")          # L2 tag equals B-probe tag on wire
-    # Case 1: some L1 MSHR still holds the line => SinkB.addrConflict / replaceConflict
-    collisions = _find_target_mshr_by_set_tag(child, pool, my_set, None)
-    addr_conflict = []
-    replace_conflict = []
-    for b in collisions:
-        # SinkB.addrConflict: same set, b.reqTag == my_tag, !willFree && !nestB
-        if b.int_of("io_msInfo_bits_reqTag") == my_tag and not b.will_free:
-            if b.bit("io_msInfo_bits_nestB") != 1:
-                addr_conflict.append(b)
-        # SinkB.replaceConflict: same set, b.metaTag == my_tag, blockRefill
-        if (b.int_of("io_msInfo_bits_metaTag") == my_tag
-                and b.bit("io_msInfo_bits_blockRefill") == 1):
-            replace_conflict.append(b)
-    for b in addr_conflict:
-        edges.append(Edge(channel_node(src.cache, "C", "in"), mshr_node(b),
-                          "probe_rejected_addrConflict",
-                          "downstream SinkB.addrConflict holds the Probe"))
-    for b in replace_conflict:
-        edges.append(Edge(channel_node(src.cache, "C", "in"), mshr_node(b),
-                          "probe_rejected_replaceConflict",
-                          "downstream SinkB.replaceConflict holds the Probe"))
-    if not addr_conflict and not replace_conflict:
-        # Case 2: MSHR-full capacity back-pressure (mshrFull -> blockB_s1)
-        active = [m for m in _same_cache_mshrs(pool[child]) if m.req_valid]
-        if len(active) >= max(1, len(pool[child].mshrs) - 1):
-            for b in active:
-                edges.append(Edge(channel_node(src.cache, "C", "in"), mshr_node(b),
-                                  "probe_blocked_mshrFull",
-                                  "downstream MSHR capacity full (blockB_s1)"))
-        else:
-            edges.append(Edge(channel_node(src.cache, "C", "in"),
-                              f"EXT::{child}::probeack_source", "ext_probeack",
-                              "no visible conflict; starvation in downstream Probe pipeline"))
+    my_tag = src.int_of("req_tag")
+    any_blocker = False
+    for child in children:
+        collisions = _find_target_mshr_by_set_tag(child, pool, my_set, None)
+        addr_conflict, replace_conflict = [], []
+        for b in collisions:
+            if b.int_of("io_msInfo_bits_reqTag") == my_tag and not b.will_free:
+                if b.bit("io_msInfo_bits_nestB") != 1:
+                    addr_conflict.append(b)
+            if (b.int_of("io_msInfo_bits_metaTag") == my_tag
+                    and b.bit("io_msInfo_bits_blockRefill") == 1):
+                replace_conflict.append(b)
+        for b in addr_conflict:
+            edges.append(Edge(channel_node(src.cache, "C", "in"), mshr_node(b),
+                              "probe_rejected_addrConflict",
+                              "downstream SinkB.addrConflict holds the Probe"))
+            any_blocker = True
+        for b in replace_conflict:
+            edges.append(Edge(channel_node(src.cache, "C", "in"), mshr_node(b),
+                              "probe_rejected_replaceConflict",
+                              "downstream SinkB.replaceConflict holds the Probe"))
+            any_blocker = True
+        if not addr_conflict and not replace_conflict:
+            active = [mm for mm in _same_cache_mshrs(pool[child]) if mm.req_valid]
+            if len(active) >= max(1, len(pool[child].mshrs) - 1):
+                for b in active:
+                    edges.append(Edge(channel_node(src.cache, "C", "in"),
+                                      mshr_node(b),
+                                      "probe_blocked_mshrFull",
+                                      "downstream MSHR capacity full (blockB_s1)"))
+                any_blocker = True
+    if not any_blocker:
+        edges.append(Edge(channel_node(src.cache, "C", "in"),
+                          f"EXT::{src.cache}::probeack_source", "ext_probeack",
+                          "no visible conflict; starvation in downstream Probe pipeline"))
     return edges
 
 
-def res_w_rprobe(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]:
-    """w_rprobeack* = 0: release-induced Probe to clients; resolves the same
-    way as pprobe because both come in on sink_c."""
-    return res_w_pprobe(src, pool)
+def res_w_rprobe(src: MSHRSnapshot, pool: Dict[str, CacheIndex],
+                 ctx: Optional[AnalyzerContext] = None) -> List[Edge]:
+    """w_rprobeack* = 0: release-induced Probe; resolves like pprobe."""
+    return res_w_pprobe(src, pool, ctx)
 
 
 # ----- scheduling-bit resolvers -----
 
-def res_s_acquire(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]:
-    """s_acquire = 0: want to send Acquire but source_a.fire has never been
-    asserted.  Possible holders: upstream cache back-pressure."""
-    src_node = mshr_node(src)
-    return [Edge(src_node, channel_node(src.cache, "A", "out"), "s_acquire",
-                 "Acquire ready=0, upstream not accepting")]
+def res_s_acquire(src: MSHRSnapshot, pool: Dict[str, CacheIndex],
+                  ctx: Optional[AnalyzerContext] = None) -> List[Edge]:
+    """s_acquire = 0: want to send Acquire but source_a.fire never asserted."""
+    return [Edge(mshr_node(src), channel_node(src.cache, "A", "out"),
+                 "s_acquire", "Acquire ready=0, upstream not accepting")]
 
 
-def res_s_pprobe(src: MSHRSnapshot, pool: Dict[str, CacheIndex]) -> List[Edge]:
+def res_s_pprobe(src: MSHRSnapshot, pool: Dict[str, CacheIndex],
+                 ctx: Optional[AnalyzerContext] = None) -> List[Edge]:
     """s_pprobe/s_rprobe = 0: want to send Probe out but SourceB can't fire."""
-    src_node = mshr_node(src)
-    return [Edge(src_node, channel_node(src.cache, "B", "out"), "s_pprobe",
-                 "Probe can't fire (SourceB queue full or addr-conflict)")]
+    return [Edge(mshr_node(src), channel_node(src.cache, "B", "out"),
+                 "s_pprobe", "Probe can't fire (SourceB queue full or addr-conflict)")]
 
 
-def res_mp_task(src: MSHRSnapshot, pool: Dict[str, CacheIndex], tag: str) -> List[Edge]:
+def res_mp_task(src: MSHRSnapshot, pool: Dict[str, CacheIndex], tag: str,
+                ctx: Optional[AnalyzerContext] = None) -> List[Edge]:
     """Common resolver for ``s_refill / s_probeack / s_release = 0``.
 
     The scheduler grants the MainPipe only when all guarding ``w_*`` bits
-    are set.  We only emit an edge if every guarding ``w_*`` is already 1 
+    are set.  We only emit an edge if every guarding ``w_*`` is already 1
     (otherwise the real wait is on the ``w_*`` bit, and we'd double-count).
-    When emitted, it points at the MainPipe pipeline node because 
+    When emitted, it points at the MainPipe pipeline node because
     ``mainpipe.ready`` is the sole remaining knob."""
     return [Edge(mshr_node(src), pipeline_node(src.cache, "mainpipe"),
                  tag, "mainpipe.ready=0 (s1..s5 backpressure)")]
 
 
 # ---------------------------------------------------------------------------
-# Rule table ------------------------------------------------------------------
+# Rule table & generic resolver -----------------------------------------------
 # ---------------------------------------------------------------------------
 
-# For each ``w_*`` bit: it's a resolver that fires when ``bit == 0``.
-WAIT_RESOLVERS: List[Tuple[str, Resolver]] = [
-    ("state_w_replResp",        res_w_replResp),
-    ("state_w_grantlast",       res_w_grant),
-    ("state_w_grant",           res_w_grant),
-    ("state_w_grantfirst",      res_w_grant),
-    ("state_w_releaseack",      res_w_releaseack),
-    ("state_w_pprobeacklast",   res_w_pprobe),
-    ("state_w_pprobeackfirst",  res_w_pprobe),
-    ("state_w_pprobeack",       res_w_pprobe),
-    ("state_w_rprobeacklast",   res_w_rprobe),
-    ("state_w_rprobeackfirst",  res_w_rprobe),
-]
+# Specialised hand-written resolvers indexed by FSM bit.  These take
+# priority over the generic resolver when a bit appears in this table.
+_SPECIALISED_WAIT_RESOLVERS: Dict[str, Resolver] = {
+    "state_w_replResp":        res_w_replResp,
+    "state_w_grantlast":       res_w_grant,
+    "state_w_grant":           res_w_grant,
+    "state_w_grantfirst":      res_w_grant,
+    "state_w_releaseack":      res_w_releaseack,
+    "state_w_pprobeacklast":   res_w_pprobe,
+    "state_w_pprobeackfirst":  res_w_pprobe,
+    "state_w_pprobeack":       res_w_pprobe,
+    "state_w_rprobeacklast":   res_w_rprobe,
+    "state_w_rprobeackfirst":  res_w_rprobe,
+}
 
-# Each entry: (s_bit, guard_w_bits, resolver)  (s_bit =0 ⇒ dependency)
-SCHED_RESOLVERS: List[Tuple[str, Sequence[str], Callable[[MSHRSnapshot, Dict[str, CacheIndex]], List[Edge]]]] = [
-    # s_acquire has no guard: always emit when =0
+_SPECIALISED_SCHED_RESOLVERS: Dict[str, Resolver] = {
+    "state_s_acquire":  res_s_acquire,
+    "state_s_pprobe":   res_s_pprobe,
+    "state_s_rprobe":   res_s_pprobe,
+    "state_s_refill":   lambda s, p, c=None: res_mp_task(s, p, "s_refill", c),
+    "state_s_release":  lambda s, p, c=None: res_mp_task(s, p, "s_release", c),
+    "state_s_probeack": lambda s, p, c=None: res_mp_task(s, p, "s_probeack", c),
+}
+
+# ---- Backward-compat list-of-tuples views (kept for external imports) ------
+WAIT_RESOLVERS: List[Tuple[str, Resolver]] = list(_SPECIALISED_WAIT_RESOLVERS.items())
+SCHED_RESOLVERS: List[Tuple[str, Sequence[str], Resolver]] = [
     ("state_s_acquire",  (), res_s_acquire),
     ("state_s_pprobe",   (), res_s_pprobe),
     ("state_s_rprobe",   (), res_s_pprobe),
-    # the three mainpipe scheduling bits
     ("state_s_refill",   ("state_w_grantlast", "state_w_rprobeacklast", "state_w_replResp"),
-                         lambda s, p: res_mp_task(s, p, "s_refill")),
+                         lambda s, p, c=None: res_mp_task(s, p, "s_refill", c)),
     ("state_s_release",  ("state_w_rprobeacklast", "state_w_grantlast", "state_w_replResp"),
-                         lambda s, p: res_mp_task(s, p, "s_release")),
+                         lambda s, p, c=None: res_mp_task(s, p, "s_release", c)),
     ("state_s_probeack", ("state_w_pprobeacklast",),
-                         lambda s, p: res_mp_task(s, p, "s_probeack")),
+                         lambda s, p, c=None: res_mp_task(s, p, "s_probeack", c)),
 ]
+
+
+def _generic_resolver(src: MSHRSnapshot, bit: str,
+                      pool: Dict[str, CacheIndex],
+                      ctx: AnalyzerContext) -> List[Edge]:
+    """Fall-back resolver for bits not covered by a hand-written rule.
+
+    Uses the schema's :class:`DriverInfo` (the driver-provenance map
+    extracted from FIRRTL) to construct a single structural edge from
+    the MSHR to the inferred driver-owner node.  This is what keeps the
+    dependency chain from breaking when a new ``w_*`` / ``s_*`` bit
+    appears in a future commit.
+    """
+    sch = src.schema
+    if sch is None:
+        return []
+    drv = sch.drivers.get(bit)
+    if drv is None:
+        return []
+    short = bit.replace("state_", "")
+    detail = (f"[generic] driver={drv.kind}"
+              + (f".{drv.channel}-{drv.direction}" if drv.kind == "channel"
+                 else (f".{drv.channel}" if drv.channel else "")))
+    if drv.kind == "channel" and drv.channel and drv.direction:
+        return [Edge(mshr_node(src),
+                     channel_node(src.cache, drv.channel, drv.direction),
+                     short, detail)]
+    if drv.kind == "directory":
+        return [Edge(mshr_node(src), directory_node(src.cache),
+                     short, detail)]
+    if drv.kind == "pipeline":
+        stage = drv.channel or "pipeline"
+        return [Edge(mshr_node(src), pipeline_node(src.cache, stage),
+                     short, detail)]
+    return [Edge(mshr_node(src),
+                 f"EXT::{src.cache}::driver_for_{short}", short,
+                 "[generic] driver=unknown (no FIRRTL match)")]
 
 
 # ---------------------------------------------------------------------------
 # Graph construction ----------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def build_wait_graph(pool: Dict[str, CacheIndex]) -> Tuple["nx.MultiDiGraph", List[MSHRSnapshot]]:
+def build_wait_graph(pool: Dict[str, CacheIndex],
+                     ctx: Optional[AnalyzerContext] = None
+                     ) -> Tuple["nx.MultiDiGraph", List[MSHRSnapshot]]:
+    """Build the wait-for graph and the list of stalled MSHRs.
+
+    When ``ctx`` is supplied (the default for auto-discovery runs),
+    per-MSHR schemas drive bit enumeration and unspecialised bits fall
+    through to the generic resolver derived from driver provenance.
+    When ``ctx`` is ``None`` the analyzer falls back to the legacy
+    hard-coded WAIT_RESOLVERS / SCHED_RESOLVERS tables.
+    """
     g: "nx.MultiDiGraph" = nx.MultiDiGraph()
     stalled: List[MSHRSnapshot] = []
     seen_edges: Set[Tuple[str, str, str]] = set()
@@ -551,7 +1167,7 @@ def build_wait_graph(pool: Dict[str, CacheIndex]) -> Tuple["nx.MultiDiGraph", Li
         _add_node_if_absent(g, edge.dst)
         g.add_edge(edge.src, edge.dst, reason=edge.reason, detail=edge.detail)
 
-    # 1. register every stalled MSHR as a node and attach its metadata
+    # 1. register every stalled MSHR as a node and attach metadata
     for ci in pool.values():
         for s in _same_cache_mshrs(ci):
             if not s.is_stalled:
@@ -561,30 +1177,68 @@ def build_wait_graph(pool: Dict[str, CacheIndex]) -> Tuple["nx.MultiDiGraph", Li
                        cache=s.cache, mshr_id=s.mshr_id,
                        state=_state_bitmap(s))
 
+    if ctx is None:
+        # ---- legacy path (no auto-discovery) -------------------------------
+        for s in stalled:
+            for wbit, resolver in WAIT_RESOLVERS:
+                if s.bit(wbit) == 0:
+                    for e in resolver(s, pool, None):
+                        _emit(e)
+        for s in stalled:
+            for sbit, guards, resolver in SCHED_RESOLVERS:
+                if s.bit(sbit) != 0:
+                    continue
+                if not all(s.bit(g_) == 1 for g_ in guards):
+                    continue
+                for e in resolver(s, pool, None):
+                    _emit(e)
+        return g, stalled
+
+    # ---- auto-discovery path ------------------------------------------
     # 2. emit waiting-bit edges
     for s in stalled:
-        for wbit, resolver in WAIT_RESOLVERS:
-            if s.bit(wbit) == 0:
-                for e in resolver(s, pool):
-                    _emit(e)
+        sch = s.schema or _BUILTIN_SCHEMA
+        for wbit in sch.waiting_bits:
+            if s.bit(wbit) != 0:
+                continue
+            res = _SPECIALISED_WAIT_RESOLVERS.get(wbit)
+            if res is not None:
+                ctx.coverage_specialised.add(wbit)
+                edges = res(s, pool, ctx)
+            else:
+                ctx.coverage_generic.add(wbit)
+                edges = _generic_resolver(s, wbit, pool, ctx)
+            ctx.coverage[wbit] += len(edges)
+            for e in edges:
+                _emit(e)
 
-    # 3. emit scheduling-bit edges (guarded to avoid duplicates)
+    # 3. emit scheduling-bit edges (guarded by schema's guard_map)
     for s in stalled:
-        for sbit, guards, resolver in SCHED_RESOLVERS:
+        sch = s.schema or _BUILTIN_SCHEMA
+        for sbit in sch.scheduling_bits:
             if s.bit(sbit) != 0:
                 continue
-            guards_ok = all(s.bit(g_) == 1 for g_ in guards)
-            if not guards_ok:
-                continue       # real wait is on the guard w_* bit
-            for e in resolver(s, pool):
+            guards = sch.guard_map.get(sbit, [])
+            if guards and not all(s.bit(g_) == 1 for g_ in guards):
+                continue
+            res = _SPECIALISED_SCHED_RESOLVERS.get(sbit)
+            if res is not None:
+                ctx.coverage_specialised.add(sbit)
+                edges = res(s, pool, ctx)
+            else:
+                ctx.coverage_generic.add(sbit)
+                edges = _generic_resolver(s, sbit, pool, ctx)
+            ctx.coverage[sbit] += len(edges)
+            for e in edges:
                 _emit(e)
 
     return g, stalled
 
 
 def _state_bitmap(s: MSHRSnapshot) -> str:
+    sch = s.schema or _BUILTIN_SCHEMA
     parts = []
-    for bit in SCHEDULING_BITS + WAITING_BITS:
+    for bit in sch.scheduling_bits + sch.waiting_bits:
         short = bit.replace("state_", "")
         v = s.bit(bit)
         parts.append(f"{short}={v}")
@@ -601,7 +1255,7 @@ def _add_node_if_absent(g: "nx.MultiDiGraph", node: str) -> None:
         g.add_node(node, kind="channel", label=f"{cache} {ch}-{direction}")
     elif node.startswith("PIPE::"):
         _, cache, stage = node.split("::")
-        g.add_node(node, kind="pipeline", label=f"{cache} MainPipe")
+        g.add_node(node, kind="pipeline", label=f"{cache} {stage}")
     elif node.startswith("EXT::"):
         g.add_node(node, kind="external", label=node[5:])
     else:
@@ -720,14 +1374,17 @@ def emit_dot(g: "nx.MultiDiGraph", cycles: List[List[str]], path: str) -> None:
         fh.write("\n".join(lines) + "\n")
 
 
-def print_text_report(g: "nx.MultiDiGraph", stalled: List[MSHRSnapshot], cycles: List[List[str]]) -> None:
+def print_text_report(g: "nx.MultiDiGraph", stalled: List[MSHRSnapshot],
+                      cycles: List[List[str]],
+                      ctx: Optional[AnalyzerContext] = None) -> None:
     print(f"=== stalled MSHRs ({len(stalled)}) ===")
     for s in stalled:
-        print(f"  {s.label}")
+        sch = s.schema or _BUILTIN_SCHEMA
+        print(f"  {s.label}    [{sch.family}]")
         print(f"    scheduling: " + ", ".join(
-            f"{b.replace('state_','')}={s.bit(b)}" for b in SCHEDULING_BITS))
+            f"{b.replace('state_','')}={s.bit(b)}" for b in sch.scheduling_bits))
         print(f"    waiting:    " + ", ".join(
-            f"{b.replace('state_','')}={s.bit(b)}" for b in WAITING_BITS))
+            f"{b.replace('state_','')}={s.bit(b)}" for b in sch.waiting_bits))
 
     print(f"\n=== dependency edges ({g.number_of_edges()}) ===")
     for u, v, data in g.edges(data=True):
@@ -739,20 +1396,52 @@ def print_text_report(g: "nx.MultiDiGraph", stalled: List[MSHRSnapshot], cycles:
     if not cycles:
         print("\n=== cycles ===")
         print("  (none - graph is a DAG: longest-stall or starvation, not deadlock)")
+    else:
+        print(f"\n=== cycles ({len(cycles)}) ===")
+        for i, c in enumerate(cycles, 1):
+            tag = classify_cycle(c, g)
+            print(f"  cycle #{i}  [{tag}]  len={len(c)}")
+            path = c + [c[0]]
+            for j in range(len(path) - 1):
+                u, v = path[j], path[j + 1]
+                reasons = sorted({d.get("reason", "")
+                                  for _, d in (g.get_edge_data(u, v) or {}).items()})
+                edge_txt = ",".join(reasons) if reasons else "?"
+                u_lbl = g.nodes[u].get("label", u)
+                print(f"    {u_lbl}")
+                print(f"         --[{edge_txt}]-->")
+            print(f"    {g.nodes[c[0]].get('label', c[0])}  (back to start)")
+
+    # ---- rule-coverage telemetry ----------------------------------------
+    if ctx is None:
         return
-    print(f"\n=== cycles ({len(cycles)}) ===")
-    for i, c in enumerate(cycles, 1):
-        tag = classify_cycle(c, g)
-        print(f"  cycle #{i}  [{tag}]  len={len(c)}")
-        path = c + [c[0]]
-        for j in range(len(path) - 1):
-            u, v = path[j], path[j + 1]
-            reasons = sorted({d.get("reason", "") for _, d in (g.get_edge_data(u, v) or {}).items()})
-            edge_txt = ",".join(reasons) if reasons else "?"
-            u_lbl = g.nodes[u].get("label", u)
-            print(f"    {u_lbl}")
-            print(f"         --[{edge_txt}]-->")
-        print(f"    {g.nodes[c[0]].get('label', c[0])}  (back to start)")
+    print("\n=== rule coverage ===")
+    print(f"  schemas in use: " +
+          ", ".join(sorted(set(s.family for s in ctx.schemas.values()))))
+    parents = {c: ctx.topology.parent(c) for c in sorted(ctx.schemas.keys())}
+    print(f"  topology.parent_of   = {parents}")
+    print(f"  topology.children_of = {dict(ctx.topology.children_of)}")
+    if ctx.coverage_specialised or ctx.coverage_generic or ctx.coverage:
+        print("  bit-level coverage (only zero-valued bits at end-of-sim are listed):")
+        all_bits = sorted(set(ctx.coverage.keys())
+                          | ctx.coverage_specialised | ctx.coverage_generic)
+        for bit in all_bits:
+            if bit in ctx.coverage_specialised:
+                kind = "specialised"
+            elif bit in ctx.coverage_generic:
+                kind = "generic    "
+            else:
+                kind = "unused     "
+            cnt = ctx.coverage.get(bit, 0)
+            print(f"    {kind} {bit:36s} edges={cnt}")
+    # warn on any stalled MSHR with zero out-degree
+    zero_out = [s for s in stalled if g.out_degree(mshr_node(s)) == 0]
+    if zero_out:
+        print("  ⚠ stalled MSHRs with zero out-degree (rule decay candidate):")
+        for s in zero_out:
+            print(f"      {s.label}  state=[{_state_bitmap(s)}]")
+    else:
+        print("  every stalled MSHR has at least one outgoing edge ✓")
 
 
 # ---------------------------------------------------------------------------
@@ -762,27 +1451,90 @@ def print_text_report(g: "nx.MultiDiGraph", stalled: List[MSHRSnapshot], cycles:
 DEFAULT_FST = "/Users/ALIENWARE/Research/XiangShan/CoupledL2-Verification/code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v2/XiangShan-CoupledL2-deadlock-v2.fst"
 
 
+def _resolve_schemas(args) -> List[Schema]:
+    """Build the schema list according to CLI flags.
+
+    With ``--no-auto`` the analyzer uses only the built-in schema.
+    Otherwise, if ``--firrtl`` is provided (or auto-detected next to
+    the FST), schema discovery and driver-provenance mining produce a
+    derived schema that supersedes the built-in for matching caches;
+    the built-in is kept as a co-resident fallback so caches that the
+    derived schema's regex doesn't match (e.g. HuanCun L3 alongside
+    CoupledL2 L1/L2) still get picked up.
+    """
+    if args.no_auto:
+        print("[schema] auto-discovery disabled (--no-auto): "
+              "using built-in CoupledL2 schema")
+        return [_BUILTIN_SCHEMA]
+    fir_path = args.firrtl or auto_detect_firrtl(args.fst)
+    if fir_path and os.path.exists(fir_path):
+        print(f"[schema] source: {fir_path}")
+        derived, _instmap = _scan_fir_file(fir_path)
+        if derived is not None:
+            n_uncovered = sum(1 for d in derived.drivers.values()
+                              if d.kind == "unknown")
+            print(f"[schema] derived: family={derived.family} "
+                  f"sched={len(derived.scheduling_bits)} "
+                  f"wait={len(derived.waiting_bits)} "
+                  f"will_free_terms={len(derived.will_free_terms)} "
+                  f"guards={len(derived.guard_map)} "
+                  f"drivers_unknown={n_uncovered}/{len(derived.drivers)}")
+            # keep built-in as a co-resident schema (its regex covers
+            # the same paths but never wins because the derived schema
+            # is tried first); harmless, but documents the fallback.
+            return [derived, _BUILTIN_SCHEMA]
+        print("[schema] FIRRTL parse yielded no schema; "
+              "falling back to built-in")
+    else:
+        print("[schema] no FIRRTL found; using built-in CoupledL2 schema")
+    return [_BUILTIN_SCHEMA]
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--fst", default=DEFAULT_FST, help="path to the FST waveform")
-    ap.add_argument("--dot", default="deadlock_graph_l2.dot", help="where to write the .dot file")
+    ap.add_argument("--dot", default="deadlock_graph_l2.dot",
+                    help="where to write the .dot file")
     ap.add_argument("--png", default=None,
                     help="optional: render the graph to this PNG via `dot`")
+    ap.add_argument("--firrtl", default=None,
+                    help="path to a Chisel/FIRRTL .fir file used for "
+                         "schema and driver-provenance discovery")
+    ap.add_argument("--no-auto", action="store_true",
+                    help="disable FIRRTL-driven auto-discovery and use "
+                         "the bundled hard-coded rule base "
+                         "(legacy behaviour)")
+    ap.add_argument("--strict", action="store_true",
+                    help="exit with non-zero status if any stalled MSHR "
+                         "has zero out-degree (CI gate against rule decay)")
     args = ap.parse_args()
 
     if not os.path.exists(args.fst):
         sys.exit(f"[fatal] no such FST: {args.fst}")
 
-    print(f"[info] replaying {args.fst}")
-    pool, end_time, _traces = replay_fst(args.fst)
-    print(f"[info] simulation end-time = {end_time}; caches found = "
-          f"{sorted(pool.keys())}; total MSHRs = {sum(len(c.mshrs) for c in pool.values())}")
+    schemas = _resolve_schemas(args)
 
-    g, stalled = build_wait_graph(pool)
-    print(f"[info] stalled MSHRs: {len(stalled)} / {sum(len(c.mshrs) for c in pool.values())}")
+    print(f"[info] replaying {args.fst}")
+    pool, end_time, _traces, cache_to_schema = replay_fst(args.fst, schemas)
+    print(f"[info] simulation end-time = {end_time}; caches found = "
+          f"{sorted(pool.keys())}; total MSHRs = "
+          f"{sum(len(c.mshrs) for c in pool.values())}")
+
+    if args.no_auto:
+        ctx: Optional[AnalyzerContext] = None
+    else:
+        topo = _infer_topology(pool)
+        ctx = AnalyzerContext(topology=topo, schemas=cache_to_schema)
+        print(f"[topology] inferred parent_of="
+              f"{ {c: topo.parent(c) for c in sorted(pool.keys())} }")
+
+    g, stalled = build_wait_graph(pool, ctx)
+    print(f"[info] stalled MSHRs: {len(stalled)} / "
+          f"{sum(len(c.mshrs) for c in pool.values())}")
 
     cycles = find_cycles(g)
-    print_text_report(g, stalled, cycles)
+    print_text_report(g, stalled, cycles, ctx)
     emit_dot(g, cycles, args.dot)
     print(f"\n[info] wrote {args.dot}")
     if args.png:
@@ -792,6 +1544,13 @@ def main() -> int:
             print(f"[info] rendered {args.png}")
         except (subprocess.SubprocessError, FileNotFoundError) as err:
             print(f"[warn] graphviz `dot` not available: {err}")
+
+    if args.strict:
+        zero_out = [s for s in stalled if g.out_degree(mshr_node(s)) == 0]
+        if zero_out:
+            print(f"[strict] {len(zero_out)} stalled MSHR(s) have zero "
+                  f"out-degree; treating as failure", file=sys.stderr)
+            return 2
     return 0
 
 
