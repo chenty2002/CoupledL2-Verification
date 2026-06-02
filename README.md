@@ -40,6 +40,13 @@ The repository datasets (cause notes, traces, waveforms, and assertion locations
     - [Code Location Mapping](#code-location-mapping)
   - [Dataset](#dataset)
     - [Critical Errors](#critical-errors)
+      - [Probe-Blocking Deadlock](#probe-blocking-deadlock)
+      - [Same-Set Replacement/Probe Deadlock](#same-set-replacementprobe-deadlock)
+      - [High Same-Set Contention Deadlock](#high-same-set-contention-deadlock)
+      - [Peer-L2 Tip/Branch Legality Violation](#peer-l2-tipbranch-legality-violation)
+      - [Stale Read After Concurrent Acquire/Release](#stale-read-after-concurrent-acquirerelease)
+      - [Nested Writeback Data Merge Race](#nested-writeback-data-merge-race)
+      - [Bounded-Latency Progress Mismatch](#bounded-latency-progress-mismatch)
 
 ---
 
@@ -92,7 +99,12 @@ This repository contains two case studies:
 |  |- deadlock-2.png
 |  |- deadlock-3.png
 |  |- TileLink_state_coherence.png
-|  `- consistency.png
+|  |- consistency.png
+|  |- mutual.png
+|  |- mutual-2.png
+|  |- mutual-3.png
+|  |- mutual_waveform.png
+|  `- waveform_deadlock.png
 |- Makefile
 `- README.md
 ```
@@ -282,16 +294,109 @@ The repository code stores these reductions as harness-level knobs (`if (useLarg
 
 ### Critical Errors
 
-| Case Directory | Suggested Critical Error Name | Bug Category | Cause Summary |
-| --- | --- | --- | --- |
-| code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v0 | Deadlock Freeness - Probe Starvation | Progress stall/deadlock freeness | Continuous same-address prefetch blocks Probe admission; circular wait forms. |
-| code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v1 | Deadlock Freeness - Replacement Conflict I | Progress stall/deadlock freeness | Same-set X/Y interaction plus replacement and Probe interlock leads to deadlock. |
-| code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v2 | Deadlock Freeness - Replacement Conflict II | Progress stall/deadlock freeness | Same root cause family as v1 and v2, reproduced in another version point. |
-| code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v3 | Deadlock Freeness - High Same-Set Contention | Progress stall/deadlock freeness | Too many same-set lines saturate ways; replacement and Probe dependency deadlocks. |
-| code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v4 | Deadlock Freeness - Bounded-Latency Mismatch | Progress stall/deadlock freeness | HuanCun parallelism bottleneck cannot satisfy a 200-cycle completion budget. |
-| code/CaseStudy_1/XiangShan-CoupledL2-peer-l2 | Protocol-State Legality - Peer L2 Tip-Branch Conflict | Protocol-state legality | Probe may be accepted before ReleaseAck ordering is fully respected, creating illegal peer state combination. |
-| code/CaseStudy_1/XiangShan-CoupledL2-copy_equality | Data Consistency - Copy Equality Update Race | Data consistency | Near-simultaneous ProbeAck and ReleaseData causes dirty data update race. |
-| code/CaseStudy_1/XiangShan-CoupledL2-write_read | Data Consistency - Write-Read Divergence | Data consistency | Concurrent Acquire/Release ordering conflict returns stale memory value. |
+This section records the root-cause explanations for the critical XiangShan CoupledL2 counterexamples.
+
+#### Probe-Blocking Deadlock
+
+Case directory: `code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v0`
+
+Bug category: progress stall/deadlock freeness
+
+![Probe-blocking deadlock scenario](figures/deadlock-1.png)
+
+The counterexample starts with both `L1_0` and `L1_1` issuing prefetch-like requests for address 0. Neither L1 has the line, so both send `AcquireBlock` requests to their local L2 slices. Both L2 slices also miss and forward `AcquireBlock` to L3. L3 first serves the request from `L2_1`, returns `GrantData`, and `L2_1` installs the line in `Trunk` state before forwarding the grant to `L1_1`.
+
+L3 then handles the competing request from `L2_0`. Because `L1_1`/`L2_1` now hold a copy of the same line, L3 sends a `Probe` to `L2_1`, and `L2_1` forwards the `Probe` to `L1_1`. At the same time, the environment keeps sending requests for address 0 into `L1_1`. CoupledL2 MainPipe blocks B-channel `Probe` admission whenever the Probe address conflicts with the request currently in the pipeline. Since the pipeline is continuously occupied by same-address prefetch requests, `blockB_s1` remains asserted.
+
+The asserted MainPipe block propagates into RequestArb and prevents the Probe from being scheduled. As a result, neither `L2_1` nor L3 receives the required `ProbeAckData`, while `L1_1` continues occupying the resource that would allow the Probe to make progress. The system stops making forward progress until the same-address request stream is interrupted.
+
+Fix direction: weaken the MainPipe Probe-blocking condition so that this same-address prefetch stream cannot indefinitely starve B-channel Probe handling. The supporting counterexample waveform is stored at `figures/waveform_deadlock.png`.
+
+#### Same-Set Replacement/Probe Deadlock
+
+Case directories: `code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v1`, `code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v2`
+
+Bug category: progress stall/deadlock freeness
+
+![Same-set replacement and Probe deadlock scenario](figures/deadlock-2.png)
+
+The counterexample begins when `L1_1` requests address X and misses in both `L1_1` and `L2_1`. `L2_1` forwards an `AcquireBlock` for X to L3. L3 accepts the request, but another cache path, `L1_0`/`L2_0`, already holds a copy of X. L3 therefore sends a `Probe` to `L2_0`, which forwards the Probe to `L1_0`.
+
+When `L1_0` receives the Probe for X, the cache line selected for X has already been occupied by address Y, so `L1_0` must perform replacement before it can complete the Probe. However, `L1_0` is already processing an `Acquire` for Y and has sent an `AcquireBlock` for Y to `L2_0`; `L2_0` also misses and forwards the `AcquireBlock` for Y to L3.
+
+HuanCun, acting as L3, serializes requests that map to the same set. Because X and Y conflict in the same set, L3 does not process the `AcquireBlock` for Y until the Probe for X completes. Conversely, `L1_0` cannot complete the Probe for X until the outstanding `Acquire` for Y completes and frees the replacement path. This creates a circular wait across L3 set serialization, L1 replacement, and Probe completion.
+
+Fix direction: adjust the replacement policy so that, after repeated blocking on the chosen victim line, CoupledL2 can switch to another way.
+
+#### High Same-Set Contention Deadlock
+
+Case directory: `code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v3`
+
+Bug category: progress stall/deadlock freeness
+
+![High same-set contention deadlock scenario](figures/deadlock-3.png)
+
+This scenario generalizes the same-set replacement deadlock. A large number of requests target addresses that map to the same set, rapidly filling all L2 ways. Once the set is full, every new request that maps to that set requires a replacement.
+
+In the counterexample, `L1_1` requests address 0, misses in `L1_1` and `L2_1`, and causes `L2_1` to send `AcquireBlock` to L3. L3 discovers that `L1_0`/`L2_0` already hold a copy of address 0 and sends a `Probe` to `L2_0`. `L2_0` cannot immediately satisfy the Probe because the target line has been displaced by other same-set addresses and replacement is required. At the same time, all ways in `L2_0` are occupied by lines whose corresponding requests are already in flight to L3.
+
+Since all of these addresses share the same set, HuanCun serializes their processing behind the outstanding Probe transaction. The Probe cannot complete until replacement can proceed, while replacement cannot proceed until one of the same-set `AcquireBlock` transactions completes. The result is a deadlock under high same-set pressure.
+
+Fix direction: limit L1-side parallelism for requests mapping to the same set, reducing the number of simultaneous same-set transactions that can occupy all replacement candidates.
+
+#### Peer-L2 Tip/Branch Legality Violation
+
+Case directory: `code/CaseStudy_1/XiangShan-CoupledL2-peer-l2`
+
+Bug category: protocol-state legality
+
+![Peer-L2 Tip/Branch legality violation scenario](figures/TileLink_state_coherence.png)
+
+The initial state contains valid copies of several lines across both L2 slices. In the violating execution, `L1_0` requests address `0b0000`; both `L1_0` and `L2_0` miss, so `L2_0` sends an `Acquire` to L3. L3 accepts the request but observes that `L1_1`/`L2_1` already hold a copy of that address, so it sends a `Probe` toward `L2_1`/`L1_1`.
+
+`L1_1` sends a `Release TtoN` for address `0b0000` and waits for the corresponding `ReleaseAck` from L3. Before that acknowledgement returns, `L2_1` SinkB accepts another same-address `Probe TtoB` and forwards it to `L1_1`. `L1_1` then returns `ProbeAck`. Inside the `L2_1` pipeline, the `ProbeAck` path can be processed before the outstanding `Release` path has fully retired, so `L2_1` temporarily retains ownership metadata for the line.
+
+L3 subsequently completes the `AcquireBlock` and sends `GrantData` to `L2_0`. Because `L2_1` has not yet observed the required `ReleaseAck`, the system can transiently expose an illegal peer-L2 state in which two L2 slices both appear to hold exclusive `Tip` permission for the same address.
+
+Fix direction: split `replaceConflict` into two blocking conditions: one for an active replacement and one for a same-address transaction that is still waiting for `ReleaseAck`. SinkB must reject or stall the new same-address Probe while either condition is true, preserving the TileLink ordering requirement: `Release` before `ReleaseAck`, and `ReleaseAck` before the conflicting `Probe`.
+
+#### Stale Read After Concurrent Acquire/Release
+
+Case directory: `code/CaseStudy_1/XiangShan-CoupledL2-write_read`
+
+Bug category: data consistency
+
+![Stale read after concurrent Acquire/Release scenario](figures/consistency.png)
+
+This counterexample violates the expected write/read consistency rule: a read should return the value from the most recent write to the same cache line. The root cause is in HuanCun non-inclusive cMSHR scheduling when an `Acquire` and a `Release` for the same address are processed concurrently.
+
+`L1_1` issues an `AcquireBlock` miss for address 0 through `L2_1`, allocating an `a_mshr` and requesting the line from L3. L3 sends a `Probe` to `L2_0`; `L2_0` hits but responds with `ProbeAck NtoN` without data. Around the same time, `L2_0` evicts the line and sends `ReleaseData`, which enters the same-set `c_mshr`.
+
+If the concurrent `Acquire` and `Release` select the same way, the `Release` can update L3 and the `Acquire` can read the updated value directly from L3. The failing execution selects different ways. Because the `Acquire` path cannot see the data associated with the other way, the protocol must force `ReleaseData` to update memory first and then fetch the line from memory. Instead, the `Acquire` reads memory before the `ReleaseData` write has completed. Memory still contains the old copy, so the returned `GrantData.d.data` is stale relative to the most recent release data.
+
+#### Nested Writeback Data Merge Race
+
+Case directory: `code/CaseStudy_1/XiangShan-CoupledL2-copy_equality`
+
+Bug category: data consistency
+
+![Nested writeback data merge race scenario](figures/copy_equality.png)
+
+This counterexample violates the copy-equality property: when two L2 slices simultaneously hold the same address in `Branch` state, their cached data should match except during explicitly modeled in-flight updates. The bug is triggered when L1 returns `ProbeAck` and `ReleaseData` for the same line in close succession, but L2 processes the two messages through paths with different latencies.
+
+L2 sends a `Probe toB` to L1 for address 0. L1 holds the line in `Tip` state, must downgrade it to `Branch`, and also decides to release the line because of replacement. L1 therefore sends `ProbeAck BtoB` and `ReleaseData TtoB` separated by only a few cycles.
+
+The `ReleaseData` enters MainPipe stage 3, where it should set `io.nestedwb.c_set_dirty` and write the dirty data into `MSHRBuffer`. In the failing timing, the matching `ProbeAck` reaches the MSHR through SinkC `io.resp` earlier. The MSHR samples `io.resps.sink_c` immediately and updates `probeDirty` before the nested `ReleaseData` has marked and written the dirty data. The later grant is therefore formed without the dirty nested writeback data, causing the data in one L2 Branch copy to diverge from the peer copy.
+
+Fix direction: delay the MSHR consumption of the SinkC response by two cycles so that nested `ReleaseData` reaches MainPipe and sets the dirty-data state before the `ProbeAck` updates the MSHR response state.
+
+#### Bounded-Latency Progress Mismatch
+
+Case directory: `code/CaseStudy_1/XiangShan-CoupledL2-deadlock-v4`
+
+Bug category: progress stall/deadlock freeness
+
+This case remains part of the critical-error dataset because it exercises the same progress-checking infrastructure as the deadlock cases above. Unlike the three detailed deadlock scenarios, it is a bounded-latency counterexample: under the configured formal bound, the HuanCun-side serialization and parallelism bottlenecks prevent the design from satisfying the 200-cycle completion budget.
 
 Relevant files:
 
