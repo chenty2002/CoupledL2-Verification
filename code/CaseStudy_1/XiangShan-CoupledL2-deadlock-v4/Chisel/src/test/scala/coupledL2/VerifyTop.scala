@@ -87,6 +87,8 @@ class VerifyTop_L2L3L2(useMessageGenerator: Boolean = false)(implicit p: Paramet
         blockBytes = 2,
         channelBytes = TLChannelBeatBytes(1),
         sourceIdRange = IdRange(0, 4),
+        ordinaryEntries = 3,
+        retainedGrantCopy = true,
         reqField = Seq(AliasField(2)),
         respKey = cacheParams.respKey,
         supportsProbe = Some(TransferSizes(cacheParams.blockBytes)),
@@ -215,7 +217,10 @@ class VerifyTop_L2L3L2(useMessageGenerator: Boolean = false)(implicit p: Paramet
     // Input signals for formal verification
     val io = IO(new Bundle {
       val topInputValids = Input(Vec(nrL2, Bool()))
-      val topInputRandomAddrs = Input(Vec(nrL2, UInt(5.W)))
+      val msggenRelease = Input(Vec(nrL2, Bool()))
+      val msggenStore = Input(Vec(nrL2, Bool()))
+      val msggenData = Input(Vec(nrL2, UInt(16.W)))
+      val topInputRandomAddrs = Input(Vec(nrL2, UInt(ram.node.in.head._2.bundle.addressBits.W)))
       val topInputNeedT = Input(Vec(nrL2, Bool()))
     })
 
@@ -227,16 +232,15 @@ class VerifyTop_L2L3L2(useMessageGenerator: Boolean = false)(implicit p: Paramet
 
     if (useMessageGenerator) {
       messageGenerators.zipWithIndex.foreach { case (msgGen, i) =>
-        msgGen.module.io.in_valid := io.topInputValids(i)
+        msgGen.module.io.in_valid := true.B
         msgGen.module.io.in_addr := io.topInputRandomAddrs(i)
-        msgGen.module.io.in_isAcquire := true.B
+        msgGen.module.io.in_isAcquire := !io.msggenRelease(i)
+        msgGen.module.io.in_store := io.msggenStore(i)
+        msgGen.module.io.in_data := io.msggenData(i)
         msgGen.module.io.in_param := io.topInputNeedT(i)
         dontTouch(msgGen.module.io)
       }
 
-      for (i <- 0 until nrL2) {
-        assume(io.topInputValids(i) || (io.topInputRandomAddrs(i) === 0.U && io.topInputNeedT(i) === false.B))
-      }
     }
 
     val verify_timer = RegInit(0.U(50.W))
@@ -420,7 +424,7 @@ class VerifyTop_L2L3()(implicit p: Parameters) extends LazyModule {
 
     // Input signals for formal verification
     val io = IO(new Bundle {
-      val topInputRandomAddrs = Input(Vec(nrL2, UInt(5.W)))
+      val topInputRandomAddrs = Input(Vec(nrL2, UInt(ram.node.in.head._2.bundle.addressBits.W)))
       val topInputNeedT = Input(Vec(nrL2, Bool()))
     })
 

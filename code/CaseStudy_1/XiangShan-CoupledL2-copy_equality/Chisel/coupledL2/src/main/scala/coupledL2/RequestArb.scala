@@ -188,9 +188,12 @@ class RequestArb(implicit p: Parameters) extends L2Module
   )
 
   /* ========  Stage 2 ======== */
+  // Native extensions may turn a Hint into a DS access. Keep ordinary hints exempt.
+  protected def hintCanAccessDS: Bool = false.B
   val s1_AHint_fire = io.sinkA.fire && io.sinkA.bits.opcode === Hint
-  // any req except AHint might access DS, and continuous DS accesses are prohibited
-  val ds_mcp2_stall = RegNext(s1_fire && !s1_AHint_fire)
+  val s1_AHint_noDS_fire = s1_AHint_fire && !hintCanAccessDS
+  // Any request except a non-DS Hint reserves the existing MCP2 spacing cycle.
+  val ds_mcp2_stall = RegNext(s1_fire && !s1_AHint_noDS_fire)
 
   s2_ready  := !ds_mcp2_stall
 

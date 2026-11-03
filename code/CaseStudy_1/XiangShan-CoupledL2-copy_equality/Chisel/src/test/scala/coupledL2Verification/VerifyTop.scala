@@ -110,6 +110,8 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
         blockBytes = if (useLarge) 64 else 2,
         channelBytes = TLChannelBeatBytes(if (useLarge) 32 else 1),
         sourceIdRange = IdRange(0, if (useLarge) 16 else 4),
+        ordinaryEntries = if (useLarge) 15 else 3,
+        retainedGrantCopy = !useLarge,
         reqField = Seq(AliasField(2)),
         respKey = cacheParams.respKey,
         supportsProbe = Some(TransferSizes(if (useLarge) 64 else 2)),
@@ -269,6 +271,8 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
 
     val io = IO(Vec(nrL2, new Bundle() {
       val inputValid = Input(Bool())
+      val msggenStore = Input(Bool())
+      val msggenData = Input(UInt((if (useLarge) 512 else 16).W))
       val inputAddr = Input(UInt(ram.node.in.head._2.bundle.addressBits.W))
       val inputNeedT = Input(Bool())
       val inputRequestType = Input(Bool()) // 0 Acquire, 1 Release
@@ -280,27 +284,29 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
           node.module.io_inputAddr := 0.U
           node.module.io_inputNeedT := false.B
           node.module.io_requestType := false.B
+          node.module.io_inputStore := false.B
+          node.module.io_inputData := 0.U
         } else {
           node.module.io_inputAddr := io(i).inputAddr
           node.module.io_inputNeedT := io(i).inputNeedT
           node.module.io_requestType := io(i).inputRequestType
+          node.module.io_inputStore := io(i).msggenStore
+          node.module.io_inputData := io(i).msggenData
         }
     }
 
     if (useMessageGenerator) {
       messageGenerators.zipWithIndex.foreach {
         case (msgGen, i) =>
-          msgGen.module.io.in_valid := io(i).inputValid
+          msgGen.module.io.in_valid := true.B
           msgGen.module.io.in_addr := io(i).inputAddr
-          msgGen.module.io.in_isAcquire := true.B
+          msgGen.module.io.in_isAcquire := !io(i).inputRequestType
+          msgGen.module.io.in_store := io(i).msggenStore
+          msgGen.module.io.in_data := io(i).msggenData
           msgGen.module.io.in_param := io(i).inputNeedT
           dontTouch(msgGen.module.io)
       }
 
-      for (i <- 0 until nrL2) {
-        assume(io(i).inputValid)
-        assume(io(i).inputAddr === 0.U)
-      }
     }
 
     coupledL2(0).module.slices.head match {

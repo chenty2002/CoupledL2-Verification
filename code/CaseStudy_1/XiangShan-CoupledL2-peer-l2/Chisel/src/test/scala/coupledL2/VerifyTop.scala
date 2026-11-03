@@ -102,6 +102,8 @@ class VerifyTop_L2L3L2(useLarge: Boolean = false, useMessageGenerator: Boolean =
         blockBytes = if (useLarge) 64 else 2,
         channelBytes = TLChannelBeatBytes(if (useLarge) 32 else 1),
         sourceIdRange = IdRange(0, if (useLarge) 16 else 4),
+        ordinaryEntries = if (useLarge) 15 else 3,
+        retainedGrantCopy = !useLarge,
         reqField = Seq(AliasField(2)),
         respKey = cacheParams.respKey,
         supportsProbe = Some(TransferSizes(if (useLarge) 64 else 2)),
@@ -232,7 +234,10 @@ class VerifyTop_L2L3L2(useLarge: Boolean = false, useMessageGenerator: Boolean =
     // Input signals for formal verification
     val io = IO(new Bundle {
       val topInputValids = Input(Vec(nrL2, Bool()))
-      val topInputRandomAddrs = Input(Vec(nrL2, UInt(5.W)))
+      val msggenRelease = Input(Vec(nrL2, Bool()))
+      val msggenStore = Input(Vec(nrL2, Bool()))
+      val msggenData = Input(Vec(nrL2, UInt((if (useLarge) 512 else 16).W)))
+      val topInputRandomAddrs = Input(Vec(nrL2, UInt(ram.node.in.head._2.bundle.addressBits.W)))
       val topInputNeedT = Input(Vec(nrL2, Bool()))
     })
 
@@ -249,17 +254,15 @@ class VerifyTop_L2L3L2(useLarge: Boolean = false, useMessageGenerator: Boolean =
 
     if (useMessageGenerator) {
       messageGenerators.zipWithIndex.foreach { case (msgGen, i) =>
-        msgGen.module.io.in_valid := io.topInputValids(i)
+        msgGen.module.io.in_valid := true.B
         msgGen.module.io.in_addr := io.topInputRandomAddrs(i)
-        msgGen.module.io.in_isAcquire := true.B
+        msgGen.module.io.in_isAcquire := !io.msggenRelease(i)
+        msgGen.module.io.in_store := io.msggenStore(i)
+        msgGen.module.io.in_data := io.msggenData(i)
         msgGen.module.io.in_param := io.topInputNeedT(i)
         dontTouch(msgGen.module.io)
       }
 
-      for (i <- 0 until nrL2) {
-        assume(io.topInputValids(i))
-        assume(io.topInputRandomAddrs(i) === 0.U)
-      }
     }
 
     val verify_timer = RegInit(0.U(50.W))
@@ -306,8 +309,8 @@ class VerifyTop_L2L3L2(useLarge: Boolean = false, useMessageGenerator: Boolean =
 
     for (i <- 0 until nrL2) {
       val l2DirTestId = if (useMessageGenerator) i else i + nrL2
-      BoringUtils.addSink(l2_stateArrays(i), s"stateArray_${l2DirTestId}")
-      BoringUtils.addSink(l2_tagArrays(i), s"tagArray_${l2DirTestId}")
+      BoringUtils.bore(l2_slices(i).directoryTest.stateArray, Seq(l2_stateArrays(i)))
+      BoringUtils.bore(l2_slices(i).directoryTest.tagArray, Seq(l2_tagArrays(i)))
     }
 
     val l3_directory = l3.module.slices.head.directory match {
@@ -315,6 +318,8 @@ class VerifyTop_L2L3L2(useLarge: Boolean = false, useMessageGenerator: Boolean =
       case _ => throw new IllegalStateException("L3 must be noninclusive for mutual assertions")
     }
     val l3_dirResult = boreOut(l3_directory.io.result)
+    // HuanCun exposes stage1 valid; result bits arrive in stage2, as in Slice's MSHR interface.
+    val l3_dirResultValid = RegNext(l3_dirResult.valid, false.B)
 
     val mshrs = if (useLarge) 16 else 4
 
@@ -403,7 +408,7 @@ class VerifyTop_L2L3L2(useLarge: Boolean = false, useMessageGenerator: Boolean =
       val l2_hit = l2_hit_vec.reduce(_ || _)
       val l2_way = OHToUInt(l2_hit_vec)
 
-      val l3_lookup_hit = l3_dirResult.valid &&
+      val l3_lookup_hit = l3_dirResultValid &&
         l3_dirResult.bits.set === l3_set &&
         l3_dirResult.bits.self.tag === l3_tag &&
         l3_dirResult.bits.self.hit &&
@@ -443,7 +448,7 @@ class VerifyTop_L2L3L2(useLarge: Boolean = false, useMessageGenerator: Boolean =
         }.reduce(_ || _)
       )
 
-      val l3_lookup_valid = l3_dirResult.valid &&
+      val l3_lookup_valid = l3_dirResultValid &&
         l3_dirResult.bits.set === l3_set &&
         l3_dirResult.bits.self.tag === l3_tag
 

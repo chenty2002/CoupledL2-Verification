@@ -112,6 +112,7 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
         blockBytes = if (useLarge) 64 else 2,
         channelBytes = TLChannelBeatBytes(if (useLarge) 32 else 1),
         sourceIdRange = IdRange(0, if (useLarge) 16 else 4),
+        ordinaryEntries = if (useLarge) 15 else 3,
         reqField = Seq(AliasField(2)),
         respKey = cacheParams.respKey,
         supportsProbe = Some(TransferSizes(if (useLarge) 64 else 2)),
@@ -239,6 +240,9 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
     val io = IO(Vec(nrL2, new Bundle() {
       // Input signals for formal verification
       val inputValid = Input(Bool())
+      val msggenRelease = Input(Bool())
+      val msggenStore = Input(Bool())
+      val msggenData = Input(UInt((if (useLarge) 512 else 16).W))
       val inputAddr = Input(UInt(ram.node.in.head._2.bundle.addressBits.W))
       val inputNeedT = Input(Bool())
     }))
@@ -257,17 +261,15 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
     if (useMessageGenerator) {
       messageGenerators.zipWithIndex.foreach {
         case (msgGen, i) =>
-          msgGen.module.io.in_valid := io(i).inputValid
+          msgGen.module.io.in_valid := true.B
           msgGen.module.io.in_addr := io(i).inputAddr
-          msgGen.module.io.in_isAcquire := true.B
+          msgGen.module.io.in_isAcquire := !io(i).msggenRelease
+          msgGen.module.io.in_store := io(i).msggenStore
+          msgGen.module.io.in_data := io(i).msggenData
           msgGen.module.io.in_param := io(i).inputNeedT
           dontTouch(msgGen.module.io)
       }
 
-      for (i <- 0 until nrL2) {
-        assume(io(i).inputValid)
-        assume(io(i).inputAddr === 0.U)
-      }
     }
 
     coupledL2(0).module.slices.head match {
@@ -278,57 +280,31 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
 
     // Keep only write_read consistency assertions in this version.
 
-    val data_p1 = RegInit(0.U(256.W))
-    val data_p2 = RegInit(0.U(256.W))
-    val valid = RegInit(false.B)
+    val observed = coupledL2.head.module.slices.head.asInstanceOf[L2Slice].io.in
+    val dataChecker = Module(new WatchedBlockDataChecker(
+      nrL2, observed.a.bits.source.getWidth, observed.a.bits.address.getWidth,
+      observed.d.bits.data.getWidth, if (useLarge) 64 else 2))
 
-    coupledL2.foreach { l2 =>
-      l2.module.slices.head match {
-        case tlSlice: L2Slice =>
-
-          val c_opcode = BoringUtils.bore(tlSlice.io.in.c.bits.opcode)
-          val c_param = BoringUtils.bore(tlSlice.io.in.c.bits.param)
-          val c_addr = BoringUtils.bore(tlSlice.io.in.c.bits.address)
-          val c_data = BoringUtils.bore(tlSlice.io.in.c.bits.data)
-          val c_valid = BoringUtils.bore(tlSlice.io.in.c.valid)
-          val c_ready = BoringUtils.bore(tlSlice.io.in.c.ready)
-          val c_flag = RegInit(false.B)
-
-          when((c_opcode === ReleaseData || c_opcode === ProbeAckData) && isParamFromT(c_param) && c_addr === 0.U && c_valid) {
-            valid := true.B
-            when(c_flag) {
-              c_flag := false.B
-              data_p2 := c_data
-            }.otherwise {
-              c_flag := true.B
-              data_p1 := c_data
-            }
-          }
-
-          val d_opcode = BoringUtils.bore(tlSlice.io.in.d.bits.opcode)
-          val d_addr = tlSlice.io.in.d.bits.echo.lift(L2AddrKey)
-            .map(addr => BoringUtils.bore(addr))
-            .getOrElse(0.U(io(0).inputAddr.getWidth.W))
-          val d_data = BoringUtils.bore(tlSlice.io.in.d.bits.data)
-          val d_valid = BoringUtils.bore(tlSlice.io.in.d.valid)
-          val d_flag = RegInit(false.B)
-
-          val d_GrantData_valid = d_opcode === GrantData && d_addr === 0.U && d_valid
-
-          fvAssert(!d_GrantData_valid ||
-            (d_flag && (d_data === data_p2 || !valid)) || (!d_flag && (d_data === data_p1 || !valid))
-          )
-
-          when(d_GrantData_valid) {
-            when(d_flag) {
-              d_flag := false.B
-              // fvAssert(d_data === data_p2 || !valid)
-            }.otherwise {
-              d_flag := true.B
-              // fvAssert(d_data === data_p1 || !valid)
-            }
-          }
-      }
+    coupledL2.zipWithIndex.foreach { case (l2, i) =>
+      val tl = l2.module.slices.head.asInstanceOf[L2Slice].io.in
+      val ch = dataChecker.io.channels(i)
+      ch.a_valid := BoringUtils.bore(tl.a.valid)
+      ch.a_ready := BoringUtils.bore(tl.a.ready)
+      ch.a_opcode := BoringUtils.bore(tl.a.bits.opcode)
+      ch.a_source := BoringUtils.bore(tl.a.bits.source)
+      ch.a_address := BoringUtils.bore(tl.a.bits.address)
+      ch.c_valid := BoringUtils.bore(tl.c.valid)
+      ch.c_ready := BoringUtils.bore(tl.c.ready)
+      ch.c_opcode := BoringUtils.bore(tl.c.bits.opcode)
+      ch.c_param := BoringUtils.bore(tl.c.bits.param)
+      ch.c_address := BoringUtils.bore(tl.c.bits.address)
+      ch.c_data := BoringUtils.bore(tl.c.bits.data)
+      ch.d_valid := BoringUtils.bore(tl.d.valid)
+      ch.d_ready := BoringUtils.bore(tl.d.ready)
+      ch.d_opcode := BoringUtils.bore(tl.d.bits.opcode)
+      ch.d_source := BoringUtils.bore(tl.d.bits.source)
+      ch.d_data := BoringUtils.bore(tl.d.bits.data)
+      fvAssert(!dataChecker.io.violation(i))
     }
   }
 }

@@ -85,6 +85,7 @@ object AutoVerify_L2L3L2 extends App {
   })
 
   val suffix = "performance"
+  println(s"VERIFY_MODE=${sys.env.getOrElse("VERIFY_MODE", "small")}")
   val useMessageGenerator = VerifyInputMode.resolveUseMessageGenerator()
   println(s"VERIFY_INPUT_MODE=${if (useMessageGenerator) "message_generator" else "coupledl2asl1"}")
   val path = "../Verilog"

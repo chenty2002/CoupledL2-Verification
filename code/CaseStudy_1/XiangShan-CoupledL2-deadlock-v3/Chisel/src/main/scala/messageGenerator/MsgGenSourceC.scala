@@ -7,6 +7,7 @@ import freechips.rocketchip.tilelink._
 
 
 class MsgGenSourceCReq(edge: TLEdgeOut, blockBytes: Int) extends Bundle {
+  val source = UInt(edge.bundle.sourceBits.W)
   val opcode  = UInt(3.W)  // ProbeAck/ProbeAckData/Release/ReleaseData
   val param   = UInt(3.W)
   val address = UInt(edge.bundle.addressBits.W)
@@ -21,11 +22,10 @@ class MsgGenSourceC(edge: TLEdgeOut, blockBytes: Int, beatBytes: Int, entries: I
   val io = IO(new Bundle {
     val req    = Flipped(Decoupled(new MsgGenSourceCReq(edge, blockBytes)))
     val tlc    = Decoupled(new TLBundleC(edge.bundle))
-    val source = Input(UInt(edge.bundle.sourceBits.W))
   })
 
   // Queue for tasks and data (similar to CoupledL2 SourceC)
-  val queue = Module(new Queue(new MsgGenSourceCReq(edge, blockBytes), entries = entries, flow = true))
+  val queue = Module(new Queue(new MsgGenSourceCReq(edge, blockBytes), entries = entries, flow = true, pipe = false))
   queue.io.enq <> io.req
 
   // Current task being sent
@@ -33,7 +33,12 @@ class MsgGenSourceC(edge: TLEdgeOut, blockBytes: Int, beatBytes: Int, entries: I
   val taskValid = beatValids.asUInt.orR
   val taskR = Reg(new MsgGenSourceCReq(edge, blockBytes))
 
-  val dequeueReady = !taskValid
+  val reqIsProbeAck = io.req.bits.opcode === TLMessages.ProbeAck || io.req.bits.opcode === TLMessages.ProbeAckData
+  val headIsRelease = queue.io.deq.bits.opcode === TLMessages.Release || queue.io.deq.bits.opcode === TLMessages.ReleaseData
+  // Preserve the Probe snapshot for a full cycle before publishing the older same-block Release.
+  val holdDequeue = !taskValid && queue.io.deq.valid && headIsRelease &&
+    io.req.fire && reqIsProbeAck && io.req.bits.address === queue.io.deq.bits.address
+  val dequeueReady = !taskValid && !holdDequeue
   queue.io.deq.ready := dequeueReady
   
   when(queue.io.deq.valid && dequeueReady) {
@@ -46,10 +51,11 @@ class MsgGenSourceC(edge: TLEdgeOut, blockBytes: Int, beatBytes: Int, entries: I
     c.opcode := task.opcode
     c.param := task.param
     c.size := log2Ceil(blockBytes).U
-    c.source := io.source
+    c.source := task.source
     c.address := task.address  // All beats use same address
     c.data := data
     c.corrupt := false.B
+    c.echo.elements.get("blockisdirty").foreach(f => f := task.opcode(0).asTypeOf(f))
     c
   }
 
@@ -59,8 +65,8 @@ class MsgGenSourceC(edge: TLEdgeOut, blockBytes: Int, beatBytes: Int, entries: I
     require(beatsOH.getWidth == lineBeats)
     
     val beatVec = data.asTypeOf(Vec(lineBeats, UInt(beatBits.W)))
-    val next_beat = Mux1H(beatsOH, beatVec)
     val selOH = PriorityEncoderOH(beatsOH)
+    val next_beat = Mux1H(selOH, beatVec)
     val next_beatsOH = beatsOH & ~selOH
     (next_beat, next_beatsOH)
   }

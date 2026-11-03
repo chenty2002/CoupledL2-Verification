@@ -50,6 +50,7 @@ object AutoVerify extends App {
     if (useLarge) new VerifyTop_large(useMessageGenerator)(p) else new VerifyTop_small(useMessageGenerator)(p)
   ))(config)
 
+  new File("Verilog").mkdirs()
   FileRegisters.writeOutputFile(
     "Verilog",
     "VerifyTop.sv",

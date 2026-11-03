@@ -233,7 +233,7 @@ class CoupledL2(implicit p: Parameters) extends LazyModule with HasCoupledL2Para
     val io = IO(new Bundle {
 //      val testPrefetchValid1 = Input(Bool())
       val prefetcherInputValid = Input(Bool())
-      val prefetcherInputRandomAddr = Input(UInt(3.W))
+      val prefetcherInputRandomAddr = Input(UInt(node.out.head._2.bundle.addressBits.W))
       val l2_hint = Valid(UInt(32.W))
       val debugTopDown = new Bundle {
         val robHeadPaddr = Vec(cacheParams.hartIds.length, Flipped(Valid(UInt(36.W))))

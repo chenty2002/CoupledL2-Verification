@@ -58,8 +58,6 @@ class DirectoryTest(implicit p: Parameters) extends L2Module with Formal {
       }
   }
 
-  BoringUtils.addSource(stateArray, s"stateArray_${instanceId}", disableDedup = true)
-  BoringUtils.addSource(tagArray, s"tagArray_${instanceId}", disableDedup = true)
 }
 
 object DirectoryTest {

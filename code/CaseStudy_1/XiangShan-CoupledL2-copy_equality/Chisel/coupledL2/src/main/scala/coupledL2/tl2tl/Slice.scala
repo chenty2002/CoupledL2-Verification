@@ -37,7 +37,7 @@ class Slice()(implicit p: Parameters) extends BaseSlice[OuterBundle] {
   })
   val io_msStatus = topDownOpt.map(_ => IO(Vec(mshrsAll, ValidIO(new MSHRStatus))))
 
-  val reqArb = Module(new RequestArb())
+  lazy val reqArb = Module(new RequestArb())
   val a_reqBuf = Module(new RequestBuffer)
   lazy val mainPipe = Module(new MainPipe())
   val mshrCtl = Module(new MSHRCtl())

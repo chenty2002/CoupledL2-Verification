@@ -8,20 +8,15 @@ import freechips.rocketchip.util.{BundleFieldBase, BundleKeyBase}
 import org.chipsalliance.cde.config.Parameters
 
 case class MessageGeneratorParam(
-  name: String = "MsgGen",
-  sets: Int = 16,
-  ways: Int = 1,
-  blockBytes: Int = 64,
-  channelBytes: TLChannelBeatBytes = TLChannelBeatBytes(32),
-  
-  // TileLink client parameters
-  sourceIdRange: IdRange = IdRange(0, 16),
-  reqField: Seq[BundleFieldBase] = Nil,
-  respKey: Seq[BundleKeyBase] = Nil,
-  supportsProbe: Option[TransferSizes] = None,
-  minLatency: Int = 1
+  name: String = "MsgGen", sets: Int = 16, ways: Int = 1,
+  blockBytes: Int = 64, channelBytes: TLChannelBeatBytes = TLChannelBeatBytes(32),
+  sourceIdRange: IdRange = IdRange(0, 16), reqField: Seq[BundleFieldBase] = Nil,
+  respKey: Seq[BundleKeyBase] = Nil, supportsProbe: Option[TransferSizes] = None,
+  minLatency: Int = 1, echoField: Seq[BundleFieldBase] = Nil,
+  ordinaryEntries: Int = 0,
+  // Opt-in parent contract: retain the current Grant copy and upstream dirty responsibility.
+  retainedGrantCopy: Boolean = false
 ) {
-  // Derived values for compatibility
   def lines: Int = sets * ways
   def clientName: String = name
   def requestFields: Seq[BundleFieldBase] = reqField
@@ -29,322 +24,335 @@ case class MessageGeneratorParam(
 }
 
 class TLMessageGenerator(params: MessageGeneratorParam)(implicit p: Parameters) extends LazyModule {
-  private val blockBytes = params.blockBytes
-  private val supportsProbe = params.supportsProbe.getOrElse(TransferSizes(blockBytes))
-  private val maxSources = params.sourceIdRange.size
-  require(maxSources > 0 && maxSources <= 16, "TLMessageGenerator expects 1 to 16 sourceIds")
-
-  val node = TLClientNode(Seq(
-    TLMasterPortParameters.v2(
-      masters = Seq(
-        TLMasterParameters.v1(
-          name = params.name,
-          sourceId = params.sourceIdRange,
-          supportsProbe = supportsProbe
-        )
-      ),
-      channelBytes = params.channelBytes,
-      minLatency = params.minLatency,
-      requestFields = params.reqField,
-      echoFields = Nil,
-      responseKeys = params.respKey
-    )
-  ))
+  require(isPow2(params.sets) && params.ways > 0)
+  require(params.sourceIdRange.size > 0 && params.sourceIdRange.size <= 16)
+  require(params.ordinaryEntries >= 0 && params.ordinaryEntries <= params.sourceIdRange.size)
+  val node = TLClientNode(Seq(TLMasterPortParameters.v2(
+    masters = Seq(TLMasterParameters.v1(name = params.name, sourceId = params.sourceIdRange,
+      supportsProbe = params.supportsProbe.getOrElse(TransferSizes(params.blockBytes)))),
+    channelBytes = params.channelBytes, minLatency = params.minLatency,
+    requestFields = params.reqField, responseKeys = params.respKey, echoFields = params.echoField)))
 
   class TLMessageGeneratorImp(wrapper: TLMessageGenerator) extends LazyModuleImp(wrapper) {
-    val out  = node.out.head._1
-    val edge = node.out.head._2
+    val (out, edge) = node.out.head
+    val blockBits = params.blockBytes * 8
+    val offBits = log2Ceil(params.blockBytes)
+    val beatBytes = edge.bundle.dataBits / 8
+    val beats = params.blockBytes / beatBytes
+    require(beats >= 1 && params.blockBytes % beatBytes == 0)
+    val beatIndexBits = log2Ceil(beats) max 1
+    val n = if (params.ordinaryEntries > 0) params.ordinaryEntries else params.sourceIdRange.size
+    require(n >= 1 && n <= params.sourceIdRange.size)
+    val lines = params.lines
+    val lineIndexBits = log2Ceil(lines) max 1
+    def base(a: UInt): UInt = (a >> offBits) << offBits
+    def set(a: UInt): UInt = (a >> offBits) & (params.sets - 1).U
+    def source(i: UInt): UInt = i +& params.sourceIdRange.start.U
 
     val io = IO(new Bundle {
-      val in_valid      = Input(Bool())
-      val in_addr       = Input(UInt(edge.bundle.addressBits.W))
-      val in_isAcquire  = Input(Bool())  // true=Acquire, false=Release
-      val in_param      = Input(Bool())  // Acquire:T/B权限; Release:toB/toN
+      val in_valid = Input(Bool())
+      val in_addr = Input(UInt(edge.bundle.addressBits.W))
+      val in_isAcquire = Input(Bool())
+      val in_param = Input(Bool())
+      // CPU writes are allowed only while this client owns stateT permission.
+      val in_store = Input(Bool())
+      val in_data = Input(UInt(blockBits.W))
     })
 
-    val lines = params.lines
-    val beatBytes = edge.bundle.dataBits / 8
-    require(blockBytes % beatBytes == 0, s"blockBytes ($blockBytes) must be a multiple of beatBytes ($beatBytes)")
-    val blockBits = blockBytes * 8
-    val lineBeats = (blockBytes / beatBytes) max 1
-    val beatBits  = beatBytes * 8
-    val beatAddrShift = log2Ceil(beatBytes)
-    val beatCountBits = scala.math.max(log2Ceil(lineBeats), 1)
-    val offBits   = log2Ceil(blockBytes)
-    val idxBits   = log2Ceil(lines)
-    val tagBits   = edge.bundle.addressBits - idxBits - offBits
-    val numSources = maxSources
-    val sourceIdVec = VecInit((0 until numSources).map(i => (params.sourceIdRange.start + i).U(edge.bundle.sourceBits.W)))
-    val defaultSourceId = params.sourceIdRange.start.U(edge.bundle.sourceBits.W)
-
-    private val releaseSourceC = Module(new MsgGenSourceC(edge, blockBytes, beatBytes, entries = 8))
-    releaseSourceC.io.source := defaultSourceId
-
-    def addrIndex(a: UInt) = (a >> offBits)(idxBits-1,0)
-    def addrTag(a: UInt)   = (a >> (offBits + idxBits))(tagBits-1,0)
-    def lineBase(a: UInt)  = Cat(a(edge.bundle.addressBits-1, offBits), 0.U(offBits.W))
-
-    // 目录状态枚举
     val stateN :: stateB :: stateT :: Nil = Enum(3)
-    
-    val dir_valid = RegInit(VecInit(Seq.fill(lines)(false.B)))
-    val dir_tag   = Reg(Vec(lines, UInt(tagBits.W)))
-    val dir_state = RegInit(VecInit(Seq.fill(lines)(stateN)))  // N=None, B=Branch, T=Trunk
-    val dir_data  = Reg(Vec(lines, UInt(blockBits.W)))
+    val valid = RegInit(VecInit(Seq.fill(lines)(false.B)))
+    val address = Reg(Vec(lines, UInt(edge.bundle.addressBits.W)))
+    val permission = Reg(Vec(lines, UInt(2.W)))
+    val data = Reg(Vec(lines, UInt(blockBits.W)))
+    val localModified = if (params.retainedGrantCopy) Some(RegInit(VecInit(Seq.fill(lines)(false.B)))) else None
+    val idle :: sendA :: waitD :: finish :: Nil = Enum(4)
+    val state = RegInit(VecInit(Seq.fill(n)(idle)))
+    val reqAddr = Reg(Vec(n, UInt(edge.bundle.addressBits.W)))
+    val reqLine = Reg(Vec(n, UInt(lineIndexBits.W)))
+    val hasWay = RegInit(VecInit(Seq.fill(n)(false.B)))
+    val bufferValid = RegInit(VecInit(Seq.fill(n)(false.B)))
+    val bufferPerm = Reg(Vec(n, UInt(2.W)))
+    val ePending = RegInit(VecInit(Seq.fill(n)(false.B)))
+    val needT = Reg(Vec(n, Bool()))
+    val grow = Reg(Vec(n, UInt(2.W)))
+    val grantSink = Reg(Vec(n, UInt(edge.bundle.sinkBits.W)))
+    val grantBeat = RegInit(VecInit(Seq.fill(n)(0.U(beatIndexBits.W))))
+    val grantData = Reg(Vec(n, Vec(beats, UInt(edge.bundle.dataBits.W))))
+    val bufferModified = if (params.retainedGrantCopy) Some(RegInit(VecInit(Seq.fill(n)(false.B)))) else None
 
-    // Acquire请求追踪
-    val entryIdle :: entrySendAcquire :: entryWaitGrant :: entryGrantAck :: Nil = Enum(4)
-    val entryActive = RegInit(VecInit(Seq.fill(numSources)(false.B)))
-    val entryState = RegInit(VecInit(Seq.fill(numSources)(entryIdle)))
-    val entryNeedT = Reg(Vec(numSources, Bool()))
-    val entryUseAcquireBlock = RegInit(VecInit(Seq.fill(numSources)(true.B)))
-    val entryAddr = Reg(Vec(numSources, UInt(edge.bundle.addressBits.W)))
-    val entryGrantAccumulating = RegInit(VecInit(Seq.fill(numSources)(false.B)))  // 正在接收Grant beats
-    val entryGrantBeatIdx = RegInit(VecInit(Seq.fill(numSources)(0.U(beatCountBits.W))))
-    
-    val entryGrantBeats = Reg(Vec(numSources, Vec(lineBeats, UInt(beatBits.W))))  // 缓存Grant数据
-    val entryGrantSink = if (edge.bundle.sinkBits > 0) Some(RegInit(VecInit(Seq.fill(numSources)(0.U(edge.bundle.sinkBits.W))))) else None
+    val sourceC = Module(new MsgGenSourceC(edge, params.blockBytes, beatBytes, entries = 2))
+    out.c <> sourceC.io.tlc
+    val probeQueue = Module(new Queue(new Bundle {
+      val param = UInt(out.b.bits.param.getWidth.W)
+      val source = UInt(edge.bundle.sourceBits.W)
+      val address = UInt(edge.bundle.addressBits.W)
+      val dataRequired = if (params.retainedGrantCopy) Some(Bool()) else None
+    }, entries = 2, flow = false, pipe = false))
+    probeQueue.io.enq.valid := out.b.valid
+    out.b.ready := probeQueue.io.enq.ready
+    probeQueue.io.enq.bits.param := out.b.bits.param
+    probeQueue.io.enq.bits.source := out.b.bits.source
+    probeQueue.io.enq.bits.address := out.b.bits.address
+    probeQueue.io.enq.bits.dataRequired.foreach(_ := out.b.bits.data(0))
+    val probeIn = probeQueue.io.deq
+    val releaseIdle :: releaseEnqueue :: releaseQueued :: releaseWaitAck :: Nil = Enum(4)
+    val releaseState = RegInit(VecInit(Seq.fill(n)(releaseIdle)))
+    val releaseLine = Reg(Vec(n, UInt(lineIndexBits.W)))
+    val releaseReq = Reg(Vec(n, new MsgGenSourceCReq(edge, params.blockBytes)))
+    val releaseToB = Reg(Vec(n, Bool()))
+    val free = VecInit((0 until n).map(i => releaseState(i) === releaseIdle && state(i) === idle)).asUInt
+    val alloc = PriorityEncoder(free)
+    val probePending = RegInit(false.B)
+    val probeAddr = Reg(UInt(edge.bundle.addressBits.W))
+    val bBase = base(probeIn.bits.address)
+    def probeConflict(a: UInt): Bool = (probePending && probeAddr === a) || (probeIn.valid && bBase === a)
+    val reserved = VecInit((0 until lines).map(i => VecInit((0 until n).map(j =>
+      (state(j) =/= idle && hasWay(j) && reqLine(j) === i.U) ||
+      (releaseState(j) =/= releaseIdle && releaseLine(j) === i.U))).asUInt.orR))
 
-    
-    private val releaseReqReg   = Reg(new MsgGenSourceCReq(edge, blockBytes))
-    val releaseReqValid = RegInit(false.B)
+    // Refill buffers acquire a way only after the Grant. One row changes owner per cycle.
+    val commitWays = Wire(Vec(n, UInt(lineIndexBits.W)))
+    val commitMask = VecInit((0 until n).map { i =>
+      val candidates = VecInit((0 until lines).map(j => set(reqAddr(i)) === (j / params.ways).U && !reserved(j)))
+      val empty = VecInit((0 until lines).map(j => candidates(j) && !valid(j)))
+      commitWays(i) := Mux(hasWay(i), reqLine(i), PriorityEncoder(Mux(empty.asUInt.orR, empty.asUInt, candidates.asUInt)))
+      val row = commitWays(i)
+      state(i) === finish && bufferValid(i) && releaseState(i) === releaseIdle &&
+        !probeConflict(reqAddr(i)) &&
+        (bufferPerm(i) === stateN || ((hasWay(i) || candidates.asUInt.orR) &&
+          !(valid(row) && probeConflict(address(row)))))
+    }).asUInt
+    val commitIndex = PriorityEncoder(commitMask)
+    val commit = commitMask.orR
+    val commitLine = commitWays(commitIndex)
 
-    // Release状态机
-    val releaseIdle :: releaseEnqueue :: releaseWaitAck :: Nil = Enum(3)
-    val releaseState = RegInit(releaseIdle)
-
-    // Acquire分配空闲槽
-    val takeAcquire = io.in_valid && io.in_isAcquire
-    val takeRelease = io.in_valid && !io.in_isAcquire
-    val takeAddrIndex = addrIndex(io.in_addr)
-    val takeAddrTag   = addrTag(io.in_addr)
-    val takeLineHit   = dir_valid(takeAddrIndex) && dir_tag(takeAddrIndex) === takeAddrTag
-    val takeLineState = dir_state(takeAddrIndex)
-    val needAcquireBlock = !takeLineHit
-    val needAcquirePerm = takeLineHit && io.in_param && takeLineState === stateB
-    val freeVec = entryActive.map(!_)
-    val freeMask = VecInit(freeVec).asUInt
-    val allocateOH = PriorityEncoderOH(freeMask)
-    val canAllocate = freeMask.orR
-    val allocateAcquire = takeAcquire && (needAcquireBlock || needAcquirePerm) && canAllocate
-    val allocIdx = OHToUInt(allocateOH)
-
-    when (allocateAcquire) {
-      entryActive(allocIdx) := true.B
-      entryState(allocIdx) := entrySendAcquire
-      entryNeedT(allocIdx) := io.in_param
-      entryUseAcquireBlock(allocIdx) := needAcquireBlock
-      entryAddr(allocIdx) := io.in_addr
-      entryGrantAccumulating(allocIdx) := false.B
-      entryGrantBeatIdx(allocIdx) := 0.U
+    val inputBase = base(io.in_addr)
+    val hits = VecInit((0 until lines).map(i => valid(i) && address(i) === inputBase))
+    val hit = hits.asUInt.orR
+    val hitLine = OHToUInt(hits)
+    val sameBlock = VecInit((0 until n).map(i =>
+      (state(i) =/= idle && reqAddr(i) === inputBase) ||
+      (releaseState(i) =/= releaseIdle && releaseReq(i).address === inputBase))).asUInt.orR
+    val canTake = io.in_valid && !sameBlock && !probeConflict(inputBase) && !commit &&
+      (!hit || !reserved(hitLine))
+    val needsAcquire = !hit || (io.in_param && permission(hitLine) === stateB)
+    val allocate = canTake && io.in_isAcquire && needsAcquire && free.orR
+    val explicitRelease = canTake && !io.in_isAcquire && hit && free.orR &&
+      (!io.in_param || permission(hitLine) === stateT)
+    when(allocate) {
+      state(alloc) := sendA
+      reqAddr(alloc) := inputBase
+      reqLine(alloc) := hitLine
+      hasWay(alloc) := hit
+      bufferValid(alloc) := false.B
+      ePending(alloc) := false.B
+      needT(alloc) := io.in_param
+      grow(alloc) := Mux(hit, TLPermissions.BtoT, Mux(io.in_param, TLPermissions.NtoT, TLPermissions.NtoB))
+      grantBeat(alloc) := 0.U
+      // Permission-only Grants preserve the existing Branch data.
+      when(hit) { grantData(alloc) := data(hitLine).asTypeOf(grantData(alloc)) }
+      bufferModified.foreach(m => m(alloc) := Mux(hit, localModified.get(hitLine), false.B))
     }
-
-    // Release请求命中则加入队列
-    when (takeRelease && takeLineHit && releaseState === releaseIdle) {
-      releaseReqReg.opcode  := TLMessages.ReleaseData
-      releaseReqReg.param   := Mux(io.in_param, TLPermissions.TtoB, TLPermissions.TtoN)
-      releaseReqReg.address := lineBase(io.in_addr)
-      releaseReqReg.data    := dir_data(takeAddrIndex)
-      releaseReqValid       := true.B
-      releaseState := releaseEnqueue
+    when(explicitRelease) {
+      releaseState(alloc) := releaseEnqueue
+      releaseLine(alloc) := hitLine
+      releaseToB(alloc) := io.in_param && permission(hitLine) === stateT
+      releaseReq(alloc).source := source(alloc)
+      releaseReq(alloc).opcode := TLMessages.ReleaseData
+      releaseReq(alloc).param := Mux(permission(hitLine) === stateT,
+        Mux(io.in_param, TLPermissions.TtoB, TLPermissions.TtoN), TLPermissions.BtoN)
+      releaseReq(alloc).address := address(hitLine)
+      releaseReq(alloc).data := data(hitLine)
     }
-
-    // Assume: Release requests must hit a valid cache line
-    assume(!io.in_valid || io.in_isAcquire || takeLineHit)
-
-    // A通道发送Acquire
-    val sendAcquireVec = VecInit((0 until numSources).map(i => entryActive(i) && entryState(i) === entrySendAcquire))
-    val sendAcquireMask = sendAcquireVec.asUInt
-    val sendAcquireSel = PriorityEncoderOH(sendAcquireMask)
-    val hasAcquireToSend = sendAcquireMask.orR
-    val acquireIndex = OHToUInt(sendAcquireSel)
-
-    // Only accept Probe when ProbeAck can be queued to SourceC.
-    out.b.ready := releaseSourceC.io.req.ready
-    out.d.ready := true.B
-
-    // B通道接收Probe并发送ProbeAck
-    val probeHitIndex = addrIndex(out.b.bits.address)
-    val probeHitTag   = addrTag(out.b.bits.address)
-    val probeHit      = dir_valid(probeHitIndex) && dir_tag(probeHitIndex) === probeHitTag
-    val probeData     = dir_data(probeHitIndex)
-    val probeState    = dir_state(probeHitIndex)
-    val probeBaseAddr = lineBase(out.b.bits.address)
-    val probeParam    = out.b.bits.param
-
-    // Calculate ProbeAck opcode: ProbeAck or ProbeAckData
-    val needProbeAckData = probeHit && probeState === stateT
-    val probeAckOpcode = Mux(needProbeAckData, TLMessages.ProbeAckData, TLMessages.ProbeAck)
-
-    // Calculate ProbeAck param based on current state and probe param
-    val probeAckParam = Mux(!probeHit, TLPermissions.NtoN,
-      MuxLookup(Cat(probeParam, probeState), TLPermissions.BtoB)(Seq(
-        Cat(TLPermissions.toN, stateB) -> TLPermissions.BtoN,  // B→N
-        Cat(TLPermissions.toN, stateT) -> TLPermissions.TtoN,  // T→N
-        Cat(TLPermissions.toB, stateT) -> TLPermissions.TtoB,  // T→B
-        Cat(TLPermissions.toB, stateB) -> TLPermissions.BtoB   // B→B (no change)
-      ))
-    )
-
-    // Enqueue ProbeAck request to SourceC
-    val probeAckReq = Wire(new MsgGenSourceCReq(edge, blockBytes))
-    probeAckReq.opcode  := probeAckOpcode
-    probeAckReq.param   := probeAckParam
-    probeAckReq.address := probeBaseAddr
-    probeAckReq.data    := Mux(needProbeAckData, probeData, 0.U)
-
-    // ProbeAck has higher priority than Release, directly connect to SourceC
-    val probeAckValid = out.b.fire
-    
-    when (out.b.fire) {
-      // Update directory state based on probe param
-      when (probeHit) {
-        when (probeParam === TLPermissions.toN) {
-          dir_valid(probeHitIndex) := false.B
-          dir_state(probeHitIndex) := stateN
-        }.elsewhen (probeParam === TLPermissions.toB && probeState === stateT) {
-          dir_state(probeHitIndex) := stateB
-        }
-        // toB on stateB or toT on stateT: no state change
-      }
-    }
-
-    // A channel: Acquire requests
-    // Similar to CoupledL2 AcquireUnit: straightforward valid/ready assignment
-    val allowAcquire = hasAcquireToSend && !probeAckValid
-    val aBitsWire = Wire(out.a.bits.cloneType)
-    aBitsWire := 0.U.asTypeOf(out.a.bits)
-    when (hasAcquireToSend) {
-      when (entryUseAcquireBlock(acquireIndex)) {
-        val growPerm = Mux(entryNeedT(acquireIndex), TLPermissions.NtoT, TLPermissions.NtoB)
-        val (_, acquireMsg) = edge.AcquireBlock(sourceIdVec(acquireIndex), lineBase(entryAddr(acquireIndex)), log2Ceil(blockBytes).U, growPerm)
-        aBitsWire := acquireMsg
+    when(commit) {
+      when(bufferPerm(commitIndex) === stateN) {
+        bufferValid(commitIndex) := false.B
+        bufferModified.foreach(m => m(commitIndex) := false.B)
+      }.elsewhen(valid(commitLine)) {
+        assert(!hasWay(commitIndex), "reserved upgrade row still valid at commit")
+        releaseState(commitIndex) := releaseEnqueue
+        releaseLine(commitIndex) := commitLine
+        releaseToB(commitIndex) := false.B
+        releaseReq(commitIndex).source := source(commitIndex)
+        releaseReq(commitIndex).opcode := TLMessages.ReleaseData
+        releaseReq(commitIndex).param := Mux(permission(commitLine) === stateT, TLPermissions.TtoN, TLPermissions.BtoN)
+        releaseReq(commitIndex).address := address(commitLine)
+        releaseReq(commitIndex).data := data(commitLine)
+        valid(commitLine) := false.B
+        localModified.foreach(m => m(commitLine) := false.B)
+        hasWay(commitIndex) := true.B
+        reqLine(commitIndex) := commitLine
       }.otherwise {
-        val (_, acquirePermMsg) = edge.AcquirePerm(sourceIdVec(acquireIndex), lineBase(entryAddr(acquireIndex)), log2Ceil(blockBytes).U, TLPermissions.BtoT)
-        aBitsWire := acquirePermMsg
+        valid(commitLine) := true.B
+        address(commitLine) := reqAddr(commitIndex)
+        permission(commitLine) := bufferPerm(commitIndex)
+        data(commitLine) := grantData(commitIndex).asUInt
+        localModified.foreach(m => m(commitLine) := bufferModified.get(commitIndex))
+        bufferModified.foreach(m => m(commitIndex) := false.B)
+        reqLine(commitIndex) := commitLine
+        hasWay(commitIndex) := true.B
+        bufferValid(commitIndex) := false.B
       }
     }
-    out.a.valid := allowAcquire
-    out.a.bits  := aBitsWire
-
-    when (out.a.fire) {
-      entryState(acquireIndex) := entryWaitGrant
+    for(i <- 0 until lines) {
+      when(io.in_valid && io.in_isAcquire && io.in_store && hit && hitLine === i.U &&
+        permission(i) === stateT && !reserved(i) && !probeConflict(inputBase) && !commit) {
+        data(i) := io.in_data
+        localModified.foreach(m => m(i) := true.B)
+      }
     }
-
-    // C channel: ProbeAck (priority) vs Release
-    // Similar to CoupledL2 SourceC: handle multi-source output with proper arbitration
-    val sourceCReqValid = Mux(probeAckValid, true.B, releaseState === releaseEnqueue && releaseReqValid)
-    val sourceCReqBits = Mux(probeAckValid, probeAckReq, releaseReqReg)
-
-    releaseSourceC.io.req.valid := sourceCReqValid
-    releaseSourceC.io.req.bits  := sourceCReqBits
-    
-    out.c <> releaseSourceC.io.tlc
-
-    // Release发送队列管理
-    val releaseIndex = addrIndex(releaseReqReg.address)
-    
-    when (releaseSourceC.io.req.fire && !probeAckValid) {
-      releaseReqValid := false.B
-      dir_valid(releaseIndex) := false.B
-      dir_state(releaseIndex) := stateN
-      releaseState := releaseWaitAck
-    }
-
-    when (out.d.fire && out.d.bits.opcode === TLMessages.ReleaseAck) {
-      releaseState := releaseIdle
-      releaseReqValid := false.B
-    }
-
-    // D channel: Grant/GrantData handling
-    // Similar to CoupledL2 RefillUnit: match source ID and accumulate beats
-    val dSourceMatch = VecInit((0 until numSources).map(i => sourceIdVec(i) === out.d.bits.source))
-    val dMatchedIdx = OHToUInt(dSourceMatch.asUInt)
-    val dMatched = dSourceMatch.asUInt.orR
-
-    when (out.d.fire && dMatched) {
-      val matchedEntry = dMatchedIdx
-      val lineIdx = addrIndex(entryAddr(matchedEntry))
-      val lineTag = addrTag(entryAddr(matchedEntry))
-      
-      when (out.d.bits.opcode === TLMessages.GrantData) {
-        entryGrantBeats(matchedEntry)(entryGrantBeatIdx(matchedEntry)) := out.d.bits.data
-        
-        when (!entryGrantAccumulating(matchedEntry)) {
-          entryGrantAccumulating(matchedEntry) := true.B
-          entryGrantBeatIdx(matchedEntry) := 0.U
-        }
-
-        // 多beat累积：最后一拍时写入目录
-        when (edge.last(out.d)) {
-          // Include the current beat explicitly; register write takes effect next cycle.
-          val grantBeatVec = Wire(Vec(lineBeats, UInt(beatBits.W)))
-          grantBeatVec := entryGrantBeats(matchedEntry)
-          grantBeatVec(entryGrantBeatIdx(matchedEntry)) := out.d.bits.data
-
-          // Build fullLine only when complete
-          val fullLine = if (lineBeats == 1) {
-            out.d.bits.data
-          } else {
-            Cat(grantBeatVec.reverse)
-          }
-          // 根据Grant的param更新entryNeedT: toT(0)=true, toB(1)=false
-          val grantedT = out.d.bits.param === TLPermissions.toT
-          entryNeedT(matchedEntry) := grantedT
-          dir_valid(lineIdx) := true.B
-          dir_tag(lineIdx)   := lineTag
-          dir_state(lineIdx) := Mux(grantedT, stateT, stateB)
-          dir_data(lineIdx)  := fullLine
-          entryGrantAccumulating(matchedEntry) := false.B
-          entryGrantBeatIdx(matchedEntry) := 0.U
-          entryState(matchedEntry) := entryGrantAck
-          if (edge.bundle.sinkBits > 0) { entryGrantSink.get(matchedEntry) := out.d.bits.sink }
-        }.otherwise {
-          entryGrantBeatIdx(matchedEntry) := entryGrantBeatIdx(matchedEntry) + 1.U
-        }
-      }.elsewhen (out.d.bits.opcode === TLMessages.Grant) {
-        // 根据Grant的param更新entryNeedT: toT(0)=true, toB(1)=false
-        val grantedT = out.d.bits.param === TLPermissions.toT
-        entryNeedT(matchedEntry) := grantedT
-        // 无数据Grant：目录写入0
-        dir_valid(lineIdx) := true.B
-        dir_tag(lineIdx)   := lineTag
-        dir_state(lineIdx) := Mux(grantedT, stateT, stateB)
-        dir_data(lineIdx)  := 0.U
-        entryState(matchedEntry) := entryGrantAck
-        entryGrantAccumulating(matchedEntry) := false.B
-        entryGrantBeatIdx(matchedEntry) := 0.U
-        if (edge.bundle.sinkBits > 0) { entryGrantSink.get(matchedEntry) := out.d.bits.sink }
+    for(i <- 0 until n) {
+      when(io.in_valid && io.in_isAcquire && io.in_store && state(i) === finish &&
+        bufferValid(i) && !ePending(i) && bufferPerm(i) === stateT && reqAddr(i) === inputBase &&
+        !probeConflict(inputBase) && !commit) {
+        grantData(i) := io.in_data.asTypeOf(grantData(i))
+        bufferModified.foreach(m => m(i) := true.B)
+      }
+      when(state(i) === finish && !bufferValid(i) && !ePending(i) && releaseState(i) === releaseIdle) {
+        state(i) := idle
+        hasWay(i) := false.B
       }
     }
 
-    // E channel: GrantAck
-    // Similar to CoupledL2 RefillUnit: straightforward enqueue and dequeue pattern
-    val grantAckVec = VecInit((0 until numSources).map(i => entryActive(i) && entryState(i) === entryGrantAck))
-    val grantAckMask = grantAckVec.asUInt
-    val grantAckSel = PriorityEncoderOH(grantAckMask)
-    val hasGrantAck = grantAckMask.orR
-    val grantAckIdx = OHToUInt(grantAckSel)
-    
-    val eBitsWire = Wire(out.e.bits.cloneType)
-    eBitsWire := 0.U.asTypeOf(out.e.bits)
-    if (edge.bundle.sinkBits > 0) {
-      when (hasGrantAck) { eBitsWire.sink := entryGrantSink.get(grantAckIdx) }
+    val probeHits = VecInit((0 until lines).map(i => valid(i) && address(i) === bBase))
+    val probeLine = OHToUInt(probeHits)
+    val probeBufferHits = VecInit((0 until n).map(i => state(i) === finish && bufferValid(i) &&
+      bufferPerm(i) =/= stateN && reqAddr(i) === bBase))
+    val probeBuffer = OHToUInt(probeBufferHits)
+    val probeInBuffer = probeBufferHits.asUInt.orR
+    val probeHit = probeHits.asUInt.orR || probeInBuffer
+    val probeT = probeHit && Mux(probeInBuffer, bufferPerm(probeBuffer), permission(probeLine)) === stateT
+    val probeModified = if (params.retainedGrantCopy)
+      Mux(probeInBuffer, bufferModified.get(probeBuffer), localModified.get(probeLine)) else true.B
+    val probeData = probeHit && ((probeT && probeModified) || probeIn.bits.dataRequired.getOrElse(false.B))
+    val dMatches = VecInit((0 until n).map(i => out.d.bits.source === (i + params.sourceIdRange.start).U))
+    val dIndex = OHToUInt(dMatches)
+    val isGrant = out.d.bits.opcode === TLMessages.Grant || out.d.bits.opcode === TLMessages.GrantData
+    val receivingGrant = VecInit((0 until n).map(i => reqAddr(i) === bBase &&
+      (ePending(i) || (state(i) === waitD && grantBeat(i) =/= 0.U)))).asUInt.orR ||
+      (out.d.valid && isGrant && dMatches.asUInt.orR && reqAddr(dIndex) === bBase)
+    val cIsRelease = out.c.bits.opcode === TLMessages.Release || out.c.bits.opcode === TLMessages.ReleaseData
+    val idleQueuedProbe = VecInit((0 until n).map(i => releaseState(i) === releaseQueued &&
+      releaseReq(i).address === bBase && !out.c.valid))
+    val releaseConflict = VecInit((0 until n).map { i =>
+      val ackedNow = releaseState(i) === releaseWaitAck && out.d.fire &&
+        out.d.bits.opcode === TLMessages.ReleaseAck && dMatches(i)
+      // An older different-block C task keeps this queued Release from being presented this cycle.
+      val queuedCross = releaseState(i) === releaseQueued && out.c.valid && cIsRelease &&
+        out.c.bits.address =/= releaseReq(i).address
+      releaseState(i) =/= releaseIdle && releaseReq(i).address === bBase && !ackedNow && !queuedCross && !idleQueuedProbe(i)
+    }).asUInt.orR
+    probeIn.ready := !probePending && !receivingGrant && !releaseConflict && sourceC.io.req.ready
+    val probeReq = Wire(new MsgGenSourceCReq(edge, params.blockBytes))
+    probeReq.source := probeIn.bits.source
+    probeReq.opcode := Mux(probeData, TLMessages.ProbeAckData, TLMessages.ProbeAck)
+    probeReq.address := bBase
+    probeReq.data := Mux(probeData, Mux(probeInBuffer, grantData(probeBuffer).asUInt, data(probeLine)), 0.U)
+    probeReq.param := Mux(!probeHit, TLPermissions.NtoN,
+      Mux(probeT, Mux(probeIn.bits.param === TLPermissions.toN, TLPermissions.TtoN,
+        Mux(probeIn.bits.param === TLPermissions.toB, TLPermissions.TtoB, TLPermissions.TtoT)),
+        Mux(probeIn.bits.param === TLPermissions.toN, TLPermissions.BtoN, TLPermissions.BtoB)))
+    val releaseSendMask = VecInit(releaseState.map(_ === releaseEnqueue)).asUInt
+    val releaseSend = PriorityEncoder(releaseSendMask)
+    sourceC.io.req.valid := probeIn.fire || releaseSendMask.orR
+    sourceC.io.req.bits := Mux(probeIn.fire, probeReq, releaseReq(releaseSend))
+    when(probeIn.fire) {
+      probePending := true.B
+      probeAddr := bBase
+      when(probeHits.asUInt.orR) {
+        when(probeIn.bits.param =/= TLPermissions.toT) { localModified.foreach(m => m(probeLine) := false.B) }
+        when(probeIn.bits.param === TLPermissions.toN) { valid(probeLine) := false.B }
+          .elsewhen(probeIn.bits.param === TLPermissions.toB) { permission(probeLine) := stateB }
+      }
+      when(probeInBuffer) {
+        when(probeIn.bits.param =/= TLPermissions.toT) { bufferModified.foreach(m => m(probeBuffer) := false.B) }
+        when(probeIn.bits.param === TLPermissions.toN) { bufferPerm(probeBuffer) := stateN }
+          .elsewhen(probeIn.bits.param === TLPermissions.toB) { bufferPerm(probeBuffer) := stateB }
+      }
+      for(i <- 0 until n) {
+        when(state(i) === sendA && reqAddr(i) === bBase && probeIn.bits.param === TLPermissions.toN) {
+          grow(i) := Mux(needT(i), TLPermissions.NtoT, TLPermissions.NtoB)
+        }
+      }
     }
-    out.e.valid := hasGrantAck
-    out.e.bits := eBitsWire
-
-    when (out.e.fire) {
-      entryActive(grantAckIdx) := false.B
-      entryState(grantAckIdx) := entryIdle
+    when(sourceC.io.req.fire && !probeIn.fire) {
+      releaseState(releaseSend) := releaseQueued
+      valid(releaseLine(releaseSend)) := releaseToB(releaseSend)
+      permission(releaseLine(releaseSend)) := stateB
+      localModified.foreach(m => m(releaseLine(releaseSend)) := false.B)
+    }
+    for (i <- 0 until n) {
+      when(releaseState(i) === releaseQueued && out.c.valid && cIsRelease &&
+        out.c.bits.source === releaseReq(i).source && out.c.bits.address === releaseReq(i).address) {
+        releaseState(i) := releaseWaitAck
+      }
+    }
+    when(out.c.fire && edge.last(out.c) &&
+      (out.c.bits.opcode === TLMessages.ProbeAck || out.c.bits.opcode === TLMessages.ProbeAckData)) {
+      probePending := false.B
+      when(out.c.bits.opcode === TLMessages.ProbeAckData && out.c.bits.param === TLPermissions.TtoT) {
+        for (i <- 0 until lines) {
+          when(valid(i) && address(i) === probeAddr) { localModified.foreach(m => m(i) := false.B) }
+        }
+        for (i <- 0 until n) {
+          when(bufferValid(i) && reqAddr(i) === probeAddr) { bufferModified.foreach(m => m(i) := false.B) }
+        }
+      }
     }
 
-    when (!out.a.valid) { out.a.bits := 0.U.asTypeOf(out.a.bits) }
+    val sendMask = VecInit(state.map(_ === sendA)).asUInt
+    val aLocked = RegInit(false.B)
+    val aIndexReg = Reg(UInt((log2Ceil(n) max 1).W))
+    val aBitsReg = Reg(out.a.bits.cloneType)
+    val aIndex = Mux(aLocked, aIndexReg, PriorityEncoder(sendMask))
+    val (_, aMessage) = edge.AcquireBlock(source(aIndex), reqAddr(aIndex), offBits.U, grow(aIndex))
+    out.a.valid := aLocked || sendMask.orR
+    out.a.bits := Mux(aLocked, aBitsReg, aMessage)
+    when(out.a.valid && !out.a.ready && !aLocked) {
+      aLocked := true.B
+      aIndexReg := aIndex
+      aBitsReg := out.a.bits
+    }
+    when(out.a.fire) { state(aIndex) := waitD; aLocked := false.B }
 
-    val io_in_addr      = io.in_addr
-    val io_in_isAcquire = io.in_isAcquire
-    val io_in_param     = io.in_param
+    out.d.ready := true.B
+    when(out.d.fire && out.d.bits.opcode === TLMessages.ReleaseAck) {
+      assert(dMatches.asUInt.orR && (releaseState(dIndex) === releaseQueued || releaseState(dIndex) === releaseWaitAck), "unsolicited ReleaseAck")
+      releaseState(dIndex) := releaseIdle
+    }
+    when(out.d.fire && isGrant) {
+      assert(dMatches.asUInt.orR && state(dIndex) === waitD, "unsolicited Grant")
+      when(out.d.bits.opcode === TLMessages.GrantData) {
+        grantData(dIndex)(grantBeat(dIndex)) := out.d.bits.data
+        grantBeat(dIndex) := grantBeat(dIndex) + 1.U
+      }
+      when(edge.last(out.d)) {
+        when(out.d.bits.opcode === TLMessages.GrantData) { bufferModified.foreach(m => m(dIndex) := false.B) }
+        when(hasWay(dIndex)) { valid(reqLine(dIndex)) := false.B }
+        bufferValid(dIndex) := true.B
+        bufferPerm(dIndex) := Mux(out.d.bits.param === TLPermissions.toT, stateT, stateB)
+        grantSink(dIndex) := out.d.bits.sink
+        grantBeat(dIndex) := 0.U
+        state(dIndex) := finish
+        ePending(dIndex) := true.B
+      }
+    }
+    val ackMask = ePending.asUInt
+    val eLocked = RegInit(false.B)
+    val eIndexReg = Reg(UInt((log2Ceil(n) max 1).W))
+    val eIndex = Mux(eLocked, eIndexReg, PriorityEncoder(ackMask))
+    out.e.valid := eLocked || ackMask.orR
+    out.e.bits := 0.U.asTypeOf(out.e.bits)
+    out.e.bits.sink := grantSink(eIndex)
+    when(out.e.valid && !out.e.ready) { eLocked := true.B; eIndexReg := eIndex }
+    when(out.e.fire) { ePending(eIndex) := false.B; eLocked := false.B }
+    for(i <- 0 until n; j <- 0 until i) {
+      assert(state(i) === idle || state(j) === idle || reqAddr(i) =/= reqAddr(j), "duplicate block Acquire")
+      assert(state(i) === idle || state(j) === idle || !hasWay(i) || !hasWay(j) || reqLine(i) =/= reqLine(j), "duplicate reserved row")
+    }
+    for(i <- 0 until lines; j <- 0 until i) {
+      assert(!valid(i) || !valid(j) || address(i) =/= address(j), "duplicate directory block")
+    }
   }
-
   lazy val module = new TLMessageGeneratorImp(this)
 }
