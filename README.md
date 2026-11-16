@@ -1,6 +1,6 @@
 # CoupledL2 Message Generator
 
-本仓库使用 Message Generator 作为 TileLink 客户端，驱动两个 CoupledL2 实例、一个 HuanCun L3 和后端内存。各用例保留各自的缓存源码、观察模块和断言，便于比较不同实现中的行为。
+This repository uses Message Generator clients at the TileLink boundary to drive two CoupledL2 instances, a HuanCun L3 cache, and backing memory. Each verification project includes its cache implementation, observation modules, and assertions so that behavior can be examined across implementation variants.
 
 ```text
 Message Generator 0 -> CoupledL2 0 --\
@@ -8,9 +8,9 @@ Message Generator 0 -> CoupledL2 0 --\
 Message Generator 1 -> CoupledL2 1 --/
 ```
 
-## 目录与用例
+## Repository structure
 
-各验证项目直接位于 `code/` 下：
+Verification projects are located directly under `code/`:
 
 ```text
 .
@@ -32,43 +32,43 @@ Message Generator 1 -> CoupledL2 1 --/
 └── jg-example/
 ```
 
-| 索引 | 目录 | 检查内容 | 生成文件 |
+| Index | Project directory | Checks | Generated file |
 | ---: | --- | --- | --- |
-| 0 | `XiangShan-CoupledL2-copy_equality` | 两个 L2 中地址 0 的共享副本数据比较，保留在途事务保护条件 | `VerifyTop_copy_equality.sv` |
-| 1 | `XiangShan-CoupledL2-write_read` | 跟踪地址 0 的写回数据，通过已接收 A 请求的 source 匹配 D 返回数据 | `VerifyTop_write_read.sv` |
-| 2 | `XiangShan-CoupledL2-deadlock-v0` | MSHR 有界进展检查 | `VerifyTop_accquire.sv` |
-| 3 | `XiangShan-CoupledL2-deadlock-v1` | MSHR 有界进展检查 | `VerifyTop_accquire.sv` |
-| 4 | `XiangShan-CoupledL2-deadlock-v2` | MSHR 有界进展检查 | `VerifyTop_acquire.sv` |
-| 5 | `XiangShan-CoupledL2-deadlock-v3` | MSHR 有界进展检查 | `VerifyTop_acquire.sv` |
-| 6 | `XiangShan-CoupledL2-deadlock-v4` | MSHR 有界进展检查 | `VerifyTop_performance.sv` |
-| 7 | `XiangShan-CoupledL2-peer-l2` | L2 副本之间及 L2/L3 的权限状态检查 | `VerifyTop_mutual.sv` |
+| 0 | `XiangShan-CoupledL2-copy_equality` | Shared-copy data comparison at address 0 across two L2 caches, with guards for in-flight transactions | `VerifyTop_copy_equality.sv` |
+| 1 | `XiangShan-CoupledL2-write_read` | Writeback-data tracking at address 0, matching D-channel responses to accepted A-channel requests by source ID | `VerifyTop_write_read.sv` |
+| 2 | `XiangShan-CoupledL2-deadlock-v0` | MSHR bounded progress | `VerifyTop_accquire.sv` |
+| 3 | `XiangShan-CoupledL2-deadlock-v1` | MSHR bounded progress | `VerifyTop_accquire.sv` |
+| 4 | `XiangShan-CoupledL2-deadlock-v2` | MSHR bounded progress | `VerifyTop_acquire.sv` |
+| 5 | `XiangShan-CoupledL2-deadlock-v3` | MSHR bounded progress | `VerifyTop_acquire.sv` |
+| 6 | `XiangShan-CoupledL2-deadlock-v4` | MSHR bounded progress | `VerifyTop_performance.sv` |
+| 7 | `XiangShan-CoupledL2-peer-l2` | Permission-state checks across peer L2 caches and between L2 and L3 | `VerifyTop_mutual.sv` |
 
-MSHR 指未完成缓存请求的跟踪项。有界进展断言检查请求是否超过设定的周期限制；触发断言后仍需分析等待关系，才能判断是否发生死锁。
+Miss status holding registers (MSHRs) track outstanding cache requests. Bounded progress assertions detect requests that exceed a configured cycle limit. A failure still requires analysis of the wait dependencies to determine whether it is a deadlock.
 
-`XiangShan-CoupledL2-Native-L1` 提供 Native L1 对照，`XiangShan-CoupledL2-TL-Test` 提供 TL-Test 仿真对照。
+`XiangShan-CoupledL2-Native-L1` provides the Native L1 comparison flow. `XiangShan-CoupledL2-TL-Test` provides the TL-Test simulation baseline.
 
-每个主流程用例包含：
+Each Message Generator project contains:
 
-- `Chisel/src/main/scala/messageGenerator/`：`TLMessageGenerator.scala` 和 C 通道发送模块 `MsgGenSourceC.scala`。
-- `Chisel/src/test/scala/`：验证顶层、生成入口及已有回归源码。
-- `Chisel/set_verify.py`：处理生成的 SystemVerilog，保留形式检查、Message Generator 自检及进展计时断言。
-- `Verilog/`：JasperGold 启动脚本和黑盒支持文件。`VerifyTop_*.sv` 由各项目的生成入口写入此目录，不纳入版本管理。
-- 用例目录下的 `.fst` 保存波形，`Chisel/Verilog/` 保存生成文件；根目录 `figures/` 保存场景图。
-- `rocket-chip/`、`utility/`、`HuanCun/`：缓存和消息生成器所需的基础依赖；部分用例将它们放在 `Chisel/coupledL2/` 下。
+- `Chisel/src/main/scala/messageGenerator/`: `TLMessageGenerator.scala` and the C-channel sender, `MsgGenSourceC.scala`.
+- `Chisel/src/test/scala/`: verification tops, generation entry points, and regression sources.
+- `Chisel/set_verify.py`: SystemVerilog post-processing that retains formal checks, Message Generator self-checks, and progress-timer assertions.
+- `Verilog/`: JasperGold launch scripts and black-box support files. Generation entry points place `VerifyTop_*.sv` files here; these outputs are excluded from version control.
+- Project-level `.fst` waveforms and generated files under `Chisel/Verilog/`. Scenario figures are stored in the repository-level `figures/` directory.
+- `rocket-chip/`, `utility/`, and `HuanCun/`: dependencies used by the caches and message generators. Some projects place these dependencies under `Chisel/coupledL2/`.
 
 ## Message Generator
 
-顶层直接实例化 `TLMessageGenerator`，无需选择输入模型。生成器跟踪缓存行地址、权限、数据、在途 Acquire、Grant/GrantAck、Probe 和 Release/ReleaseAck，并处理多拍传输和通道握手。
+The verification tops instantiate `TLMessageGenerator` directly. The generator tracks cache-line addresses, permissions, data, outstanding acquisitions, Grant/GrantAck responses, probes, and Release/ReleaseAck exchanges. It also handles multibeat transfers and channel handshakes.
 
-顶层输入决定请求地址、Acquire/Release、是否请求独占权限以及写入数据。写入仅在生成器持有相应权限时生效。各用例的激励方式如下：`deadlock-v0` 至 `deadlock-v3` 用有效信号更新请求地址寄存器；其他用例直接使用地址输入。生成器的 `in_valid` 在这些顶层中固定为真。
+Top-level inputs select the request address, Acquire or Release operation, exclusive-permission request, and store data. Stores take effect only when the generator holds the required permission. In `deadlock-v0` through `deadlock-v3`, valid inputs update a request-address register. Other projects use the address input directly. The generator's `in_valid` is tied high in these tops.
 
-小配置通常采用 2 字节缓存行、1 字节通道、4 个 source ID 和 3 个普通事务项。部分用例启用 `retainedGrantCopy`，其具体取值以对应 `VerifyTop.scala` 为准。观察模块比较的是实现中接出的状态和数据，不能据此推导完整处理器行为的覆盖范围。
+The small profile typically uses 2-byte cache lines, 1-byte channel beats, four source IDs, and three ordinary transaction entries. Some projects enable `retainedGrantCopy`; its setting is defined in the corresponding `VerifyTop.scala`. Observation modules compare state and data exposed by the implementation. These checks do not establish coverage of all processor behaviors.
 
-## 工具与入口
+## Requirements and quick start
 
-需要 Java、Mill、Python 3 和 JasperGold（`jg`）。生成脚本使用命令名 `python`，应指向 Python 3。使用各目录的 `.mill-version` 和 `build.sc` 确认版本；`copy_equality`、`write_read` 使用 Chisel 6.6.0，其余用例使用 Chisel 3.6 系列。Chisel 6 的 SystemVerilog 生成还需要可用的 `firtool`。
+The main flow requires Java, Mill, Python 3, and JasperGold (`jg`). Generation scripts invoke `python`, which must resolve to Python 3. Tool versions are specified in each project's `.mill-version` and `build.sc`. The `copy_equality` and `write_read` projects use Chisel 6.6.0; the other Message Generator projects use Chisel 3.6. Chisel 6 SystemVerilog generation also requires `firtool`.
 
-在仓库根目录执行：
+From the repository root:
 
 ```bash
 make help
@@ -78,44 +78,44 @@ make verify 1 VERIFY_MODE=large
 make verify 6 VERIFY_MODE=large
 ```
 
-`VERIFY_MODE` 默认为 `small`，索引 0 至 7 均支持 `large`。根入口先生成对应顶层，再使用表中的确切文件名调用 `Verilog/setup.sh`。
+`VERIFY_MODE` defaults to `small`. Indices 0 through 7 also support `large`. The root entry point generates the selected top and invokes `Verilog/setup.sh` with the exact filename listed above.
 
-也可以在用例的 `Chisel/` 目录直接生成：
+To generate a top directly from a project's `Chisel/` directory:
 
 ```bash
-# copy_equality、write_read
+# copy_equality and write_read
 make auto
 
-# deadlock-v0 至 deadlock-v4、peer-l2
+# deadlock-v0 through deadlock-v4, and peer-l2
 make auto-l2l3l2
 ```
 
-随后进入该用例的 `Verilog/`，使用表中的文件名：
+Then enter that project's `Verilog/` directory and use its generated filename:
 
 ```bash
 ./setup.sh VerifyTop_copy_equality.sv
-# 可选参数：证明时间上限（小时）、线程数、每引擎最大任务数
+# Optional arguments: proof time limit in hours, threads, maximum jobs per engine
 ./setup.sh VerifyTop_copy_equality.sv 24 16 32
 ```
 
-直接用 Mill 调用顶层时，应设置 `VERIFY_MODE=small` 或 `large`。局部 Makefile 会提供 `small` 默认值。
+When invoking a top through Mill directly, set `VERIFY_MODE=small` or `VERIFY_MODE=large`. The local Makefiles supply the `small` default.
 
-## 参数与进展检查对照
+## Parameter profiles and progress-check ablation
 
-参数选择保留在每个用例的 `VerifyTop.scala` 中，包括生成器的 sets/ways、缓存行和通道宽度、事务项数量、L2/L3 配置及内存地址范围。不同源码版本的参数不完全相同，应以该用例的配置为准。
+Each project's `VerifyTop.scala` defines the generator sets and ways, cache-line and channel widths, transaction-entry counts, L2/L3 parameters, and memory address range. Parameter values differ across implementation variants; use the configuration in the selected project.
 
-`deadlock-v0` 至 `deadlock-v3` 支持将 `timers_N` 的有界断言转换为无界的 SystemVerilog Assertions（SVA）最终性检查：
+For `deadlock-v0` through `deadlock-v3`, the `timers_N` bounded assertions can be converted to unbounded SystemVerilog Assertions (SVA) eventuality checks:
 
 ```bash
 make verify 2 VERIFY_ABLATION=wo-bounded-liveness
 python code/preprocess_sva.py --case XiangShan-CoupledL2-deadlock-v0 --dry-run
 ```
 
-`deadlock-v4` 使用 `assertLivenessTimer`，不使用这一转换入口。`VERIFY_ABLATION` 默认为 `none`。正式判断断言是否生效，需要检查生成文件和工具结果；源码中的接线本身不代表验证已完成。
+`deadlock-v4` uses `assertLivenessTimer` and is not supported by this conversion entry point. `VERIFY_ABLATION` defaults to `none`. Check the generated assertions and tool results to determine which properties are active and what has been verified; source-level wiring alone is not a completed verification result.
 
-## Native L1 与 TL-Test
+## Native L1 and TL-Test
 
-Native L1 和 TL-Test 使用独立的源码、构建文件和运行入口：
+Native L1 and TL-Test have separate sources, build files, and entry points:
 
 ```bash
 make native-l1
@@ -125,13 +125,13 @@ make tltest all
 make tltest-help
 ```
 
-Native L1 使用 `Chisel/src/main/scala/nativeL1/` 中的客户端，经 `Chisel/Makefile` 的 `auto` 目标生成 `VerifyTop_all.sv`，再交给 `Verilog/setup.sh`。可用 `NATIVE_L1_TOP` 指定顶层路径。TL-Test 的依赖和参数见其[说明](code/XiangShan-CoupledL2-TL-Test/README.md)；该流程还需要 Verilator、CMake、C++ 编译器和 SQLite 开发库。
+Native L1 uses the client in `Chisel/src/main/scala/nativeL1/`. Its `Chisel/Makefile` target `auto` generates `VerifyTop_all.sv`, which is passed to `Verilog/setup.sh`. Set `NATIVE_L1_TOP` to override the top-file path. TL-Test dependencies and options are described in its [README](code/XiangShan-CoupledL2-TL-Test/README.md). The simulation flow also requires Verilator, CMake, a C++ compiler, and the SQLite development library.
 
-## 波形
+## Waveforms
 
-各项目的 FST 波形如下。检查其完整层次记录后，均可识别出两个 `messageGenerators` 实例，以及各自的 `sourceC` 和 `probeQueue`。`io_in_isAcquire` 与顶层 `msggenStore`、`msggenData` 等信号进一步确认了输入模型。
+All eight FST waveforms contain two `messageGenerators` instances with their own `sourceC` and `probeQueue` instances. The `io_in_isAcquire` signal and top-level `msggenStore` and `msggenData` signals also identify the Message Generator input model.
 
-| 项目 | 波形文件 | 输入模型 | 数据输入位宽 |
+| Project | Waveform | Input model | Data input width |
 | --- | --- | --- | ---: |
 | `copy_equality` | [XiangShan-CoupledL2-copy_equality.fst](code/XiangShan-CoupledL2-copy_equality/XiangShan-CoupledL2-copy_equality.fst) | Message Generator | 16 |
 | `deadlock-v0` | [XiangShan-CoupledL2-deadlock-v0.fst](code/XiangShan-CoupledL2-deadlock-v0/XiangShan-CoupledL2-deadlock-v0.fst) | Message Generator | 16 |
@@ -142,15 +142,19 @@ Native L1 使用 `Chisel/src/main/scala/nativeL1/` 中的客户端，经 `Chisel
 | `peer-l2` | [XiangShan-CoupledL2-peer-l2.fst](code/XiangShan-CoupledL2-peer-l2/XiangShan-CoupledL2-peer-l2.fst) | Message Generator | 16 |
 | `write_read` | [XiangShan-CoupledL2-write_read-1017.fst](code/XiangShan-CoupledL2-write_read/XiangShan-CoupledL2-write_read-1017.fst) | Message Generator | 16 |
 
-这些波形的消息数据输入为 16 位，对应 2 字节缓存行的小配置。large 配置的数据输入为 512 位。输入模型识别说明波形来自 Message Generator 顶层，不代表它与当前源码完全一致，也不能据此认定 large 配置已经完成验证。
+The 16-bit message-data inputs correspond to the small profile's 2-byte cache lines. The large profile uses 512-bit data inputs. These declarations identify the input model, but do not establish an exact match with the current sources or demonstrate verification of the large profile.
 
-层次记录的编码依据 [libfst 的读取实现](https://github.com/gtkwave/libfst/blob/main/src/fstapi.c)解析。这里只读取层次与信号声明，没有重新运行仿真或形式验证。
+The hierarchy-record encoding follows the [libfst reader implementation](https://github.com/gtkwave/libfst/blob/main/src/fstapi.c). This identification uses hierarchy and signal declarations; it does not require a new simulation or formal run.
 
-## 场景图
+## Scenario figures
 
-- [Probe 阻塞场景](figures/deadlock-1.png)
-- [同组替换与 Probe 等待场景](figures/deadlock-2.png)
-- [同组竞争场景](figures/deadlock-3.png)
-- [TileLink 状态场景](figures/TileLink_state_coherence.png)
-- [数据一致性场景](figures/consistency.png)
-- [共享副本数据场景](figures/copy_equality.png)
+- [Probe-blocking scenario](figures/deadlock-1.png)
+- [Same-set replacement and Probe wait](figures/deadlock-2.png)
+- [Same-set contention](figures/deadlock-3.png)
+- [TileLink state scenario](figures/TileLink_state_coherence.png)
+- [Data consistency scenario](figures/consistency.png)
+- [Shared-copy data scenario](figures/copy_equality.png)
+
+## License notices
+
+Source and dependency licenses are provided in their respective directories. Mulan PSL v2 [license files](code/XiangShan-CoupledL2-deadlock-v4/Chisel/LICENSE) retain the Chinese and English license text supplied with the sources.

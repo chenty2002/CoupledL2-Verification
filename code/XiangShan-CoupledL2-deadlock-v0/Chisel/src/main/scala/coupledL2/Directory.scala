@@ -181,7 +181,7 @@ class Directory(implicit p: Parameters) extends L2Module with Formal {
 
   // io.testIoDirectoryMetaArray := metaRead.map(_.state)
 
-  // tag 跟 set 相同 => 同地址，然后用 resp.state, 牵出来 metaArray.io.w metaWen 有效信号，有效时更新 软件写目录
+  // Matching tag and set identify the same address; expose resp.state and the metaArray write enable to update the directory shadow on valid writes.
 
   val metaAll_s3 = RegEnable(metaRead, 0.U.asTypeOf(metaRead), reqValid_s2)
   val tagAll_s3 = RegEnable(tagRead, 0.U.asTypeOf(tagRead), reqValid_s2)

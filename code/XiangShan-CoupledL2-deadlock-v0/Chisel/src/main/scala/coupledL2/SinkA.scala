@@ -31,7 +31,7 @@ import utility.MemReqSource
 class SinkA(implicit p: Parameters) extends L2Module {
   val io = IO(new Bundle() {
     val a = Flipped(DecoupledIO(new TLBundleA(edgeIn.bundle)))
-    val prefetchReq = prefetchOpt.map(_ => Flipped(DecoupledIO(new PrefetchReq)))  // 11.17: 从prefectcher进入流水线, 
+    val prefetchReq = prefetchOpt.map(_ => Flipped(DecoupledIO(new PrefetchReq)))  // 11.17: Prefetch requests enter the pipeline here.
     val task = DecoupledIO(new TaskBundle)
   })
   assert(!(io.a.valid && io.a.bits.opcode(2, 1) === 0.U), "no Put")

@@ -349,7 +349,7 @@ class VerifyTop()(implicit p: Parameters) extends LazyModule {
       m.status_valid === true.B
     }).orR
 
-    // l2l3mutual: 补l2 mainpipe task_s1(request_arb)/s2/s3(mainpipe) set=0
+    // L2/L3 mutual checks: guard on set-0 tasks in RequestArb stage 1 and MainPipe stages 2 and 3.
     val l2_reqarb_prop_patch_s1 = coupledL2.map { l2 =>
       l2.module.slices.head match {
         case tlSlice: L2Slice => 

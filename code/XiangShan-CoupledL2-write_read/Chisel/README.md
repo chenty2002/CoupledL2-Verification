@@ -1,19 +1,19 @@
 # XiangShan-CoupledL2-write_read
 
-本用例使用两个 Message Generator 驱动 CoupledL2，经 HuanCun L3 连接到 TLRAM。
+This project uses two Message Generator clients to drive CoupledL2 instances connected to TLRAM through a HuanCun L3 cache.
 
-支持 `VERIFY_MODE=small|large`，默认 `small`。
+`VERIFY_MODE` supports `small` and `large`, with `small` as the default.
 
 ```bash
 make auto
 ```
 
-- 验证顶层：`src/test/scala/coupledL2Verification/VerifyTop.scala` 中的 `VerifyTop`。
-- 自动生成入口：同目录 `AutoVerify.scala` 中的 `AutoVerify`。
-- 消息生成器：`src/main/scala/messageGenerator/TLMessageGenerator.scala`。
-- C 通道发送模块：`src/main/scala/messageGenerator/MsgGenSourceC.scala`。
-- `set_verify.py` 处理生成文件；`AutoVerify` 将结果复制到 `../Verilog/`。
+- Verification top: `VerifyTop` in `src/test/scala/coupledL2Verification/VerifyTop.scala`.
+- Generation entry point: `AutoVerify` in `AutoVerify.scala` in the same directory.
+- Message generator: `src/main/scala/messageGenerator/TLMessageGenerator.scala`.
+- C-channel sender: `src/main/scala/messageGenerator/MsgGenSourceC.scala`.
+- `set_verify.py` processes the generated SystemVerilog; `AutoVerify` copies the result to `../Verilog/`.
 
-工具版本见本目录 `.mill-version` 和 `build.sc`。源码和基础依赖已随仓库保存，生成入口不要求先重新应用 `scripts/` 中的补丁。
+Tool versions are specified in `.mill-version` and `build.sc`. The repository includes the sources and dependencies needed by the generation entry point; the patches in `scripts/` do not need to be reapplied first.
 
-用例索引、检查范围和 JasperGold 调用方法见[仓库说明](../../../README.md)。
+See the [repository README](../../../README.md) for project indices, check scope, and JasperGold commands.
