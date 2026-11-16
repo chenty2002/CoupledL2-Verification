@@ -25,9 +25,8 @@ import utility._
 import org.chipsalliance.cde.config.Parameters
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.tilelink.TLMessages._
-import coupledL2.prefetch.{BOPParameters, PrefetchTrain}
+import coupledL2.prefetch.PrefetchTrain
 import coupledL2.utils.{XSPerfAccumulate, XSPerfHistogram, XSPerfMax}
-import coupledL2AsL1.prefetch.CoupledL2AsL1PrefParam
 
 class MSHRSelector(implicit p: Parameters) extends L2Module {
   val io = IO(new Bundle() {
@@ -216,12 +215,8 @@ class MSHRCtl(implicit p: Parameters) extends L2Module with Formal {
       }.elsewhen (m.io.status.valid) {
         timer := timer + 1.U
       }
-      cacheParams.prefetch.getOrElse(BOPParameters) match {
-        case _: CoupledL2AsL1PrefParam =>
-        case _ =>
-          when(m.io.status.bits.channel === 1.U) {
-            assert(timer <= 1000.U, "TimeOut")
-          }
+      when(m.io.status.bits.channel === 1.U) {
+        assert(timer <= 1000.U, "TimeOut")
       }
       val enable = m.io.status.valid && m.io.status.bits.will_free
       XSPerfHistogram(cacheParams, "mshr_latency_" + Integer.toString(i, 10),

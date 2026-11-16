@@ -26,7 +26,6 @@ import org.chipsalliance.cde.config.Parameters
 import coupledL2.prefetch.{BOPParameters, PfSource}
 import freechips.rocketchip.tilelink.TLMessages._
 import chiselFv._
-import coupledL2AsL1.prefetch.CoupledL2AsL1PrefParam
 
 class MetaEntry(implicit p: Parameters) extends L2Bundle {
   val dirty = Bool()

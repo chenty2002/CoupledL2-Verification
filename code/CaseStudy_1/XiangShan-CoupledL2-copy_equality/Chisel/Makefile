@@ -1,3 +1,5 @@
+export VERIFY_MODE ?= small
+
 init:
 	git submodule update --init
 	cd coupledL2 && git submodule update --init HuanCun rocket-chip utility

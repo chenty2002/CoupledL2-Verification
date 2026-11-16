@@ -1,3 +1,5 @@
+export VERIFY_MODE ?= small
+
 init:
 	git submodule update --init
 	cd rocket-chip && git submodule update --init hardfloat cde
@@ -5,14 +7,8 @@ init:
 compile:
 	mill -i CoupledL2.compile
 
-verify-l2l3:
-	mill -i CoupledL2.test.runMain coupledL2.VerifyTop_L2L3
-
 verify-l2l3l2:
 	mill -i CoupledL2.test.runMain coupledL2.VerifyTop_L2L3L2
-
-auto-l2l3:
-	mill -i CoupledL2.test.runMain coupledL2.AutoVerify_L2L3
 
 auto-l2l3l2:
 	mill -i CoupledL2.test.runMain coupledL2.AutoVerify_L2L3L2

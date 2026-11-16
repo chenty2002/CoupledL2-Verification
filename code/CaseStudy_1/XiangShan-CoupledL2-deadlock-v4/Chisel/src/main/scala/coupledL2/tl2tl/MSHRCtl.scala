@@ -27,7 +27,6 @@ import freechips.rocketchip.tilelink.TLMessages._
 import coupledL2._
 import coupledL2.prefetch.{BOPParameters, PrefetchTrain}
 import coupledL2.utils.{XSPerfAccumulate, XSPerfHistogram, XSPerfMax}
-import coupledL2AsL1.prefetch.CoupledL2AsL1PrefParam
 
 class MSHRSelector(implicit p: Parameters) extends L2Module {
   val io = IO(new Bundle() {

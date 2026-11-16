@@ -8,7 +8,6 @@ import chisel3.util.experimental.BoringUtils
 import chiselFv._
 import coupledL2._
 import coupledL2.tl2tl.{Slice => L2Slice, _}
-import coupledL2AsL1._
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tile.MaxHartIdBits
 import freechips.rocketchip.tilelink.TLMessages.{GrantData, ProbeAckData, ReleaseData}
@@ -21,7 +20,6 @@ import utility._
 
 import java.io.File
 import scala.sys
-
 
 object VerifyMode {
   private val envName = "VERIFY_MODE"
@@ -42,23 +40,6 @@ object VerifyMode {
   }
 }
 
-object VerifyInputMode {
-  private val envName = "VERIFY_INPUT_MODE"
-
-  def resolveUseMessageGenerator(): Boolean = {
-    sys.env.get(envName).map(_.trim.toLowerCase) match {
-      case Some("coupledl2asl1") | Some("legacy") => false
-      case Some("message_generator") | Some("messagegenerator") | Some("msggen") => true
-      case Some(other) =>
-        throw new IllegalArgumentException(
-          s"Unsupported $envName=$other, expected 'coupledl2asl1' or 'message_generator'"
-        )
-      case None => false
-    }
-  }
-}
-
-
 object baseConfig {
   def apply(maxHartIdBits: Int) = {
     new Config((_, _, _) => {
@@ -67,9 +48,9 @@ object baseConfig {
   }
 }
 
-class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)(implicit p: Parameters) extends LazyModule {
+class VerifyTop(useLarge: Boolean = false)(implicit p: Parameters) extends LazyModule {
 
-  /* L1D   L1D
+  /* MG0   MG1
    *  |     |
    * L2    L2
    *  \    /
@@ -82,28 +63,7 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
 
   val nrL2 = 2
 
-  def createClientNode(name: String, sources: Int) = {
-    val masterNode = TLClientNode(Seq(
-      TLMasterPortParameters.v2(
-        masters = Seq(
-          TLMasterParameters.v1(
-            name = name,
-            sourceId = IdRange(0, sources),
-            supportsProbe = TransferSizes(cacheParams.blockBytes)
-          )
-        ),
-        channelBytes = TLChannelBeatBytes(cacheParams.blockBytes),
-        minLatency = 1,
-        echoFields = Nil,
-        requestFields = Seq(AliasField(2)),
-        responseKeys = cacheParams.respKey
-      )
-    ))
-    masterNode
-  }
-  val l0_client_nodes = (0 until nrL2).map(i => createClientNode(s"L0_$i", 32))
-
-  val messageGenerators: Seq[TLMessageGenerator] = if (useMessageGenerator) {
+  val messageGenerators: Seq[TLMessageGenerator] =
     (0 until nrL2).map(i => LazyModule(new TLMessageGenerator(
       MessageGeneratorParam(
         name = s"msgGen$i",
@@ -119,33 +79,8 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
         minLatency = 1
       )
     )))
-  } else {
-    Seq.empty
-  }
 
-  val l0_nodes = l0_client_nodes
-
-  val coupledL2AsL1: Seq[TLCoupledL2AsL1] = if (useMessageGenerator) {
-    Seq.empty
-  } else {
-    (0 until nrL2).map(i => LazyModule(new TLCoupledL2AsL1()(baseConfig(1).alter((_, here, _) => {
-      case L2ParamKey => L2Param(
-        name = s"L1d_$i",
-        ways = if (useLarge) 8 else 2,
-        sets = if (useLarge) 64 else 2,
-        blockBytes = if (useLarge) 64 else 2,
-        channelBytes = TLChannelBeatBytes(if (useLarge) 32 else 1),
-        mshrs = if (useLarge) 16 else 4,
-        clientCaches = Seq(L1Param(aliasBitsOpt = Some(2))),
-        hartId = i,
-        prefetch = Some(InputAsPrefectchParam())
-      )
-      case huancun.BankBitsKey => 0 // FV: 1 bank for L1s
-    })))
-    )
-  }
-  val l1d_nodes = coupledL2AsL1.map(_.node)
-  val req_nodes = if (useMessageGenerator) messageGenerators.map(_.node) else l1d_nodes
+  val req_nodes = messageGenerators.map(_.node)
 
   val coupledL2 = (0 until nrL2).map(i => LazyModule(new TL2TLCoupledL2()(baseConfig(1).alter((_, here, _) => {
     case L2ParamKey => L2Param(
@@ -189,12 +124,6 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
   val xbar = TLXbar()
   val ram = LazyModule(new TLRAM(AddressSet(0, if (useLarge) 0xffffffL else 0x1fL), beatBytes = if (useLarge) 32 else 1))
 
-  if (!useMessageGenerator) {
-    l0_nodes.zip(l1d_nodes) map {
-      case (l0, l1d) => l1d := l0
-    }
-  }
-
   req_nodes.zip(l2_nodes).zipWithIndex map {
     case ((l1d, l2), i) => l2 := 
         TLLogger(s"L2_L1[${i}].C[0]", !cacheParams.FPGAPlatform && cacheParams.enableTLLog) := 
@@ -216,13 +145,6 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
       l3.node :=* xbar
 
   lazy val module = new LazyModuleImp(this) with Formal {
-    coupledL2AsL1.foreach {
-      l1 => {
-        l1.module.io.debugTopDown <> DontCare
-        l1.module.io.hartId := DontCare
-        l1.module.io.l2_tlb_req <> DontCare
-      }
-    }
 
     coupledL2.foreach {
       l2 => {
@@ -247,29 +169,15 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
       val inputNeedT = Input(Bool())
     }))
 
-    coupledL2AsL1.zipWithIndex.foreach {
-      case (node, i) =>
-        if (useMessageGenerator) {
-          node.module.io_inputAddr := 0.U
-          node.module.io_inputNeedT := false.B
-        } else {
-          node.module.io_inputAddr := io(i).inputAddr
-          node.module.io_inputNeedT := io(i).inputNeedT
-        }
-    }
-
-    if (useMessageGenerator) {
-      messageGenerators.zipWithIndex.foreach {
-        case (msgGen, i) =>
-          msgGen.module.io.in_valid := true.B
-          msgGen.module.io.in_addr := io(i).inputAddr
-          msgGen.module.io.in_isAcquire := !io(i).msggenRelease
-          msgGen.module.io.in_store := io(i).msggenStore
-          msgGen.module.io.in_data := io(i).msggenData
-          msgGen.module.io.in_param := io(i).inputNeedT
-          dontTouch(msgGen.module.io)
-      }
-
+    messageGenerators.zipWithIndex.foreach {
+      case (msgGen, i) =>
+        msgGen.module.io.in_valid := true.B
+        msgGen.module.io.in_addr := io(i).inputAddr
+        msgGen.module.io.in_isAcquire := !io(i).msggenRelease
+        msgGen.module.io.in_store := io(i).msggenStore
+        msgGen.module.io.in_data := io(i).msggenData
+        msgGen.module.io.in_param := io(i).inputNeedT
+        dontTouch(msgGen.module.io)
     }
 
     coupledL2(0).module.slices.head match {
@@ -309,16 +217,14 @@ class VerifyTop(useLarge: Boolean = false, useMessageGenerator: Boolean = false)
   }
 }
 
-class VerifyTop_large(useMessageGenerator: Boolean = false)(implicit p: Parameters)
-  extends VerifyTop(useLarge = true, useMessageGenerator = useMessageGenerator)(p)
-class VerifyTop_small(useMessageGenerator: Boolean = false)(implicit p: Parameters)
-  extends VerifyTop(useLarge = false, useMessageGenerator = useMessageGenerator)(p)
+class VerifyTop_large()(implicit p: Parameters)
+  extends VerifyTop(useLarge = true)(p)
+class VerifyTop_small()(implicit p: Parameters)
+  extends VerifyTop(useLarge = false)(p)
 
 object VerifyTop extends App {
   val useLarge = VerifyMode.resolveUseLarge()
-  val useMessageGenerator = VerifyInputMode.resolveUseMessageGenerator()
   println(s"VERIFY_MODE=${if (useLarge) "large" else "small"}")
-  println(s"VERIFY_INPUT_MODE=${if (useMessageGenerator) "message_generator" else "coupledl2asl1"}")
   val config = baseConfig(1).alterPartial({
     case L2ParamKey => L2Param(
       ways = 4,
@@ -332,7 +238,7 @@ object VerifyTop extends App {
     )
   })
   val top = DisableMonitors(p => LazyModule(
-    if (useLarge) new VerifyTop_large(useMessageGenerator)(p) else new VerifyTop_small(useMessageGenerator)(p)
+    if (useLarge) new VerifyTop_large()(p) else new VerifyTop_small()(p)
   ))(config)
   val directory = new File("./Verilog")
 

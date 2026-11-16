@@ -1,16 +1,25 @@
 #!/bin/bash
+set -euo pipefail
+
+if [ "$#" -lt 1 ] || [ "$#" -gt 4 ]; then
+    echo "Usage: ./setup.sh filepath [time=24] [threads=16] [max_jobs=32]" >&2
+    exit 1
+fi
 path=$1
+if [ ! -s "$path" ]; then
+    echo "Missing or empty SystemVerilog top: $path" >&2
+    exit 1
+fi
+for file in LogPerfHelper.v ResetCounter.sv STD_CLKGT_func.v ClockGate.v TLLogWriter.v; do
+    if [ ! -f "$file" ]; then
+        echo "Missing verification support file: $file" >&2
+        exit 1
+    fi
+done
+command -v jg >/dev/null 2>&1 || { echo "Missing required command: jg" >&2; exit 1; }
 time=24
 threads=16
 max_jobs=32
-if [ $# -lt 1 ]
-then
-    echo "Usage: ./setup.sh [time=0] [threads=16] [max_jobs=32]"
-    echo "  time: set_prove_time_limit \${time}h"
-    echo "  threads: set_engine_threads \${threads}"
-    exit
-fi
-
 if [ $# -gt 1 ]
 then
     time=$2
@@ -24,11 +33,11 @@ then
     fi
 fi
 
-echo "analyze -sv VerifyTop.sv LogPerfHelper.v ResetCounter.sv STD_CLKGT_func.v ClockGate.v TLLogWriter.v" > verify.tcl
+echo "analyze -sv {${path}} LogPerfHelper.v ResetCounter.sv STD_CLKGT_func.v ClockGate.v TLLogWriter.v" > verify.tcl
 echo "elaborate" >> verify.tcl
 echo "reset reset" >> verify.tcl
 echo "clock clock" >> verify.tcl
-if [ $time -gt 0 ]
+if [ "$time" -gt 0 ]
 then
     echo "set_prove_time_limit ${time}h" >> verify.tcl
 else

@@ -29,7 +29,6 @@ Usage:
 
 from __future__ import annotations
 
-import glob
 import os
 import re
 import shutil
@@ -37,23 +36,23 @@ import sys
 import argparse
 from typing import Dict, List, Optional, Tuple
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CaseStudy_1")
 DEFAULT_CASE_DIRS: Dict[str, str] = {
     "XiangShan-CoupledL2-deadlock-v0": "XiangShan-CoupledL2-deadlock-v0",
     "XiangShan-CoupledL2-deadlock-v1": "XiangShan-CoupledL2-deadlock-v1",
     "XiangShan-CoupledL2-deadlock-v2": "XiangShan-CoupledL2-deadlock-v2",
     "XiangShan-CoupledL2-deadlock-v3": "XiangShan-CoupledL2-deadlock-v3",
-    "XiangShan-CoupledL2-deadlock-v4": "XiangShan-CoupledL2-deadlock-v4",
 }
 
 
 def normalize_root(root: str) -> str:
     root = os.path.abspath(root)
-    if os.path.basename(root) == "code":
-        return root
-    code_root = os.path.join(root, "code")
-    if os.path.isdir(code_root):
-        return code_root
+    for candidate in (
+        os.path.join(root, "code", "CaseStudy_1"),
+        os.path.join(root, "CaseStudy_1"),
+    ):
+        if os.path.isdir(candidate):
+            return candidate
     return root
 
 
@@ -86,13 +85,17 @@ def find_deadlock_sv_files(root: str, requested_case: str) -> List[str]:
         vdir = os.path.join(case_dir, "Verilog")
         if not os.path.isdir(vdir):
             continue
-        sv_files = glob.glob(os.path.join(vdir, "VerifyTop*.sv"))
-        if len(sv_files) == 0:
-            print(f"  [SKIP] No VerifyTop*.sv in {case_name}: {vdir}")
-        elif len(sv_files) == 1:
-            result.append(sv_files[0])
+        suffix = {
+            "XiangShan-CoupledL2-deadlock-v0": "accquire",
+            "XiangShan-CoupledL2-deadlock-v1": "accquire",
+            "XiangShan-CoupledL2-deadlock-v2": "acquire",
+            "XiangShan-CoupledL2-deadlock-v3": "acquire",
+        }[case_name]
+        sv_path = os.path.join(vdir, f"VerifyTop_{suffix}.sv")
+        if os.path.isfile(sv_path):
+            result.append(sv_path)
         else:
-            print(f"  [WARN] Multiple VerifyTop*.sv in {case_name}: {sv_files}")
+            print(f"  [SKIP] Missing generated top: {sv_path}")
     return result
 
 
@@ -242,8 +245,7 @@ def process_file(sv_path: str, dry_run: bool = False) -> bool:
             return False
 
     if not any("assert(timers_" in l for l in lines):
-        print("  [SKIP] No timer asserts found.")
-        return False
+        raise ValueError(f"No supported timer assertions found in {sv_path}")
 
     # ----------------------------------------------------------------
     # Find module containing timer asserts
@@ -259,8 +261,7 @@ def process_file(sv_path: str, dry_run: bool = False) -> bool:
     # ----------------------------------------------------------------
     ta_start, ta_end, asserts = find_timer_assert_always_block(lines, module_start)
     if ta_start is None or not asserts:
-        print("  [ERROR] Could not find/parse the timer-assert always block.")
-        return False
+        raise ValueError(f"Could not parse the timer-assert block in {sv_path}")
     print(
         f"  Timer-assert block: lines {ta_start + 1}–{ta_end + 1}  "
         f"({len(asserts)} assertions)"
@@ -360,13 +361,13 @@ def main():
     )
     parser.add_argument(
         "--root", default=ROOT,
-        help="Repository root or code root to search (default: script directory)"
+        help="Repository root, code root, or CaseStudy_1 (default: code/CaseStudy_1)"
     )
     parser.add_argument(
         "--case", default="all",
         help=(
             "Deadlock case to preprocess. "
-            "Use one of XiangShan-CoupledL2-deadlock-v0..v4 or all "
+            "Use one of XiangShan-CoupledL2-deadlock-v0..v3 or all "
             "(default: all)."
         )
     )

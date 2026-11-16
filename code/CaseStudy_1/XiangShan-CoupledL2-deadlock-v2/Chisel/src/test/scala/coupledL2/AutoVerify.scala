@@ -10,7 +10,6 @@ import java.io._
 import scala.collection.mutable.ArrayBuffer
 import org.chipsalliance.cde.config.Parameters
 
-
 object AutoVerify_L2L3L2 extends App {
   def modifyPy(filename: String): Unit = {
     val pylines = new ArrayBuffer[String]()
@@ -43,12 +42,10 @@ object AutoVerify_L2L3L2 extends App {
 
   val suffix = "acquire"
   val useLarge = VerifyMode.resolveUseLarge()
-  val useMessageGenerator = VerifyInputMode.resolveUseMessageGenerator()
   println(s"VERIFY_MODE=${if (useLarge) "large" else "small"}")
-  println(s"VERIFY_INPUT_MODE=${if (useMessageGenerator) "message_generator" else "coupledl2asl1"}")
   val path = "../Verilog"
   val top = DisableMonitors(p => LazyModule(
-    if (useLarge) new VerifyTop_large(useMessageGenerator)(p) else new VerifyTop_small(useMessageGenerator)(p)
+    if (useLarge) new VerifyTop_large()(p) else new VerifyTop_small()(p)
   ))(config)
 
   (new ChiselStage).emitSystemVerilog(
@@ -56,9 +53,11 @@ object AutoVerify_L2L3L2 extends App {
     Array("--target-dir", s"Verilog/L2L3L2")
   )
   val cp = s"cp Verilog/L2L3L2/VerifyTop.sv .".!
+  require(cp == 0, "Failed to stage generated SystemVerilog")
   val filename = s"VerifyTop_${suffix}.sv"
   modifyPy(filename)
   val py = "python set_verify_.py".!
-  val rm = s"rm -f ${path}/${filename}".!
+  require(py == 0, "SystemVerilog post-processing failed")
   val cpjg = s"cp ${filename} ${path}/${filename}".!
+  require(cpjg == 0, "Failed to copy formal top")
 }

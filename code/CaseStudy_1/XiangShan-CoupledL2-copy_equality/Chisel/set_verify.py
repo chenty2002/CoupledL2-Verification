@@ -16,11 +16,21 @@ with open('Verilog/VerifyTop.sv') as fin:
 
         lout = []
         i = 0
+        module_name = ""
         while i < len(lines):
+            if lines[i].lstrip().startswith("module "):
+                module_name = lines[i].split()[1].split("(")[0]
             # print(i)
             if '$error' not in lines[i] and 'assert(' in lines[i]:
                 j = i-1
-                flag = False
+                # Keep the input model's own checks and bounded progress checks.
+                flag = (
+                    "$fwrite" not in lines[i]
+                    and (
+                        module_name.startswith(("TLMessageGenerator", "MsgGenSourceC"))
+                        or "assert(timers_" in lines[i]
+                    )
+                )
                 while j >= 0:
                     # print('j: '+str(j))
                     if ('match_tag' in lines[j] or 'resetCounter_notChaos' in lines[j]):

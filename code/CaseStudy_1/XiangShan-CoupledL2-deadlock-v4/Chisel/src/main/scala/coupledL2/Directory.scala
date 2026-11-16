@@ -27,7 +27,6 @@ import coupledL2.utils._
 import utility.{ParallelPriorityMux, RegNextN}
 import org.chipsalliance.cde.config.Parameters
 import coupledL2.prefetch.{BOPParameters, PfSource}
-import coupledL2AsL1.prefetch.CoupledL2AsL1PrefParam
 import freechips.rocketchip.tilelink.TLMessages._
 
 class MetaEntry(implicit p: Parameters) extends L2Bundle {

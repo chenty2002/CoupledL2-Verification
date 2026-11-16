@@ -32,7 +32,7 @@ class DataStorageTest(implicit p: Parameters) extends L2Module {
     val wdata = Input(new DSBlock)
   })
 
-  val array = RegInit(VecInit.fill(blocks)(0.U(16.W)))
+  val array = RegInit(VecInit.fill(blocks)(0.U((blockBytes * 8).W)))
 
   val arrayIdx = Cat(io.req.bits.way, io.req.bits.set)
   val wen = io.req.valid && io.req.bits.wen

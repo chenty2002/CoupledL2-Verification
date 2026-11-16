@@ -10,7 +10,6 @@ import java.io._
 import scala.collection.mutable.ArrayBuffer
 import scala.sys.process._
 
-
 object AutoVerify extends App {
   def modifyPy(filename: String): Unit = {
     val pylines = new ArrayBuffer[String]()
@@ -25,7 +24,7 @@ object AutoVerify extends App {
     }
     pyFile.close()
 
-    val newPy = new BufferedWriter(new FileWriter(new File("set_verify.py")))
+    val newPy = new BufferedWriter(new FileWriter(new File("set_verify_.py")))
     pylines.foreach { line =>
       newPy.write(line + "\n")
     }
@@ -42,12 +41,10 @@ object AutoVerify extends App {
   })
 
   val useLarge = VerifyMode.resolveUseLarge()
-  val useMessageGenerator = VerifyInputMode.resolveUseMessageGenerator()
   println(s"VERIFY_MODE=${if (useLarge) "large" else "small"}")
-  println(s"VERIFY_INPUT_MODE=${if (useMessageGenerator) "message_generator" else "coupledl2asl1"}")
 
   val top = DisableMonitors(p => LazyModule(
-    if (useLarge) new VerifyTop_large(useMessageGenerator)(p) else new VerifyTop_small(useMessageGenerator)(p)
+    if (useLarge) new VerifyTop_large()(p) else new VerifyTop_small()(p)
   ))(config)
 
   new File("Verilog").mkdirs()
@@ -59,12 +56,12 @@ object AutoVerify extends App {
                                   firtoolOpts = Array("--disable-annotation-unknown"))
   )
   val suffix = "write_read"
-  //  val cp = s"cp Verilog/VerifyTop.sv .".!
   val filename = s"VerifyTop_${suffix}.sv"
   modifyPy(filename)
-  val py = "python set_verify.py".!
+  val py = "python set_verify_.py".!
+  require(py == 0, "SystemVerilog post-processing failed")
   println(s"Verilog File Name: ${filename}")
   val path = "../Verilog"
-  val rm = s"rm -f ${path}/${filename}".!
   val cpjg = s"cp ${filename} ${path}/${filename}".!
+  require(cpjg == 0, "Failed to copy formal top")
 }

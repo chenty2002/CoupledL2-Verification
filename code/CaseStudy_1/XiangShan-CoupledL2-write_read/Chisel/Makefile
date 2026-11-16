@@ -1,3 +1,5 @@
+export VERIFY_MODE ?= small
+
 init:
 	git submodule update --init
 	cd rocket-chip && git submodule update --init hardfloat cde
