@@ -146,7 +146,18 @@ Native L1 uses the client in `Chisel/src/main/scala/nativeL1/`. Its `Chisel/Make
 
 ## Waveforms
 
-The eight FST waveforms linked in the project table contain two `messageGenerators` instances with their own `sourceC` and `probeQueue` instances. The `io_in_isAcquire` signal and top-level `msggenStore` and `msggenData` signals also identify the Message Generator input model.
+The eight FST waveforms contain two `messageGenerators` instances with their own `sourceC` and `probeQueue` instances. The `io_in_isAcquire` signal and top-level `msggenStore` and `msggenData` signals also identify the Message Generator input model.
+
+| Project | Waveform |
+| --- | --- |
+| `copy_equality` | [XiangShan-CoupledL2-copy_equality.fst](code/XiangShan-CoupledL2-copy_equality/XiangShan-CoupledL2-copy_equality.fst) |
+| `write_read` | [XiangShan-CoupledL2-write_read-1017.fst](code/XiangShan-CoupledL2-write_read/XiangShan-CoupledL2-write_read-1017.fst) |
+| `deadlock-v0` | [XiangShan-CoupledL2-deadlock-v0.fst](code/XiangShan-CoupledL2-deadlock-v0/XiangShan-CoupledL2-deadlock-v0.fst) |
+| `deadlock-v1` | [XiangShan-CoupledL2-deadlock-v1.fst](code/XiangShan-CoupledL2-deadlock-v1/XiangShan-CoupledL2-deadlock-v1.fst) |
+| `deadlock-v2` | [XiangShan-CoupledL2-deadlock-v2.fst](code/XiangShan-CoupledL2-deadlock-v2/XiangShan-CoupledL2-deadlock-v2.fst) |
+| `deadlock-v3` | [XiangShan-CoupledL2-deadlock-v3.fst](code/XiangShan-CoupledL2-deadlock-v3/XiangShan-CoupledL2-deadlock-v3.fst) |
+| `deadlock-v4` | [XiangShan-CoupledL2-deadlock-v4.fst](code/XiangShan-CoupledL2-deadlock-v4/XiangShan-CoupledL2-deadlock-v4.fst) |
+| `peer-l2` | [XiangShan-CoupledL2-peer-l2.fst](code/XiangShan-CoupledL2-peer-l2/XiangShan-CoupledL2-peer-l2.fst) |
 
 All eight waveforms have 16-bit message-data inputs, which correspond to the small profile's 2-byte cache lines. The large profile uses 512-bit data inputs. These declarations identify the input model, but do not establish an exact match with the current sources or demonstrate verification of the large profile.
 
