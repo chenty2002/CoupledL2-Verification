@@ -1,2 +1,0 @@
-# display trace.yw
-yosys-witness display trace.yw
