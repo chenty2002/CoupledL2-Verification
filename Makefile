@@ -22,7 +22,7 @@ TLTEST_CASE ?= $(TLTEST_CASE_FROM_GOALS)
 TLTEST_THREADS_BUILD ?= 64
 TLTEST_VERIFY_MAX_CYCLE ?= 2000
 NATIVE_L1_TOP ?= ../Chisel/VerifyTop_all.sv
-XIANGSHAN_CASE_ROOT := code/CaseStudy_1
+XIANGSHAN_ROOT := code
 
 define PRINT_MAPPING
 echo "Usage: make verify <index>  (or: make verify IDX=<index>)"; \
@@ -59,7 +59,7 @@ endef
 define PRINT_TLTEST_MAPPING
 echo "Usage: make tltest <case>  (or: make tltest TLTEST_CASE=<case>)"; \
 echo "Input supports directory name or index:"; \
-echo "TL-Test ablation cases:"; \
+echo "TL-Test simulation projects:"; \
 echo "  all: run all TL-Test ablation cases"; \
 echo "  0: XiangShan-CoupledL2-copy_equality"; \
 echo "  1: XiangShan-CoupledL2-write_read"; \
@@ -74,7 +74,7 @@ endef
 
 define PRINT_NATIVE_L1_MAPPING
 echo "Usage: make native-l1"; \
-echo "Runs the \"w/o Simplified L1\" ablation based on $(XIANGSHAN_CASE_ROOT)/XiangShan-CoupledL2-Native-L1."; \
+echo "Runs Native L1 verification in $(XIANGSHAN_ROOT)/XiangShan-CoupledL2-Native-L1."; \
 echo "Optional: NATIVE_L1_TOP=$(NATIVE_L1_TOP)"
 endef
 
@@ -126,7 +126,7 @@ tltest:
 	echo "TL-Test target: $$tltest_target"; \
 	echo "TLTEST_THREADS_BUILD=$(TLTEST_THREADS_BUILD)"; \
 	echo "TLTEST_VERIFY_MAX_CYCLE=$(TLTEST_VERIFY_MAX_CYCLE)"; \
-	( cd $(XIANGSHAN_CASE_ROOT)/XiangShan-CoupledL2-TL-Test && \
+	( cd $(XIANGSHAN_ROOT)/XiangShan-CoupledL2-TL-Test && \
 	  $(MAKE) "$$tltest_target" THREADS_BUILD="$(TLTEST_THREADS_BUILD)" VERIFY_MAX_CYCLE="$(TLTEST_VERIFY_MAX_CYCLE)" )
 
 native-l1:
@@ -140,10 +140,10 @@ native-l1:
 		echo "Missing required command for verification: jg"; \
 		exit 1; \
 	fi; \
-	echo "Compile in $(XIANGSHAN_CASE_ROOT)/XiangShan-CoupledL2-Native-L1/Chisel: make auto"; \
-	( cd $(XIANGSHAN_CASE_ROOT)/XiangShan-CoupledL2-Native-L1/Chisel && $(MAKE) auto ) || exit $$?; \
-	echo "Verify in $(XIANGSHAN_CASE_ROOT)/XiangShan-CoupledL2-Native-L1/Verilog: ./setup.sh $(NATIVE_L1_TOP)"; \
-	( cd $(XIANGSHAN_CASE_ROOT)/XiangShan-CoupledL2-Native-L1/Verilog && ./setup.sh "$(NATIVE_L1_TOP)" ) || exit $$?
+	echo "Compile in $(XIANGSHAN_ROOT)/XiangShan-CoupledL2-Native-L1/Chisel: make auto"; \
+	( cd $(XIANGSHAN_ROOT)/XiangShan-CoupledL2-Native-L1/Chisel && $(MAKE) auto ) || exit $$?; \
+	echo "Verify in $(XIANGSHAN_ROOT)/XiangShan-CoupledL2-Native-L1/Verilog: ./setup.sh $(NATIVE_L1_TOP)"; \
+	( cd $(XIANGSHAN_ROOT)/XiangShan-CoupledL2-Native-L1/Verilog && ./setup.sh "$(NATIVE_L1_TOP)" ) || exit $$?
 
 verify:
 	@idx="$(IDX)"; \
@@ -181,8 +181,8 @@ verify:
 			$(PRINT_MAPPING); \
 			exit 1 ;; \
 	esac; \
-	case_root="$(XIANGSHAN_CASE_ROOT)"; \
-	case_path="$$case_root/$$dir"; \
+	project_root="$(XIANGSHAN_ROOT)"; \
+	project_path="$$project_root/$$dir"; \
 	for tool in java python mill jg; do \
 		if ! command -v $$tool >/dev/null 2>&1; then \
 			echo "Missing required command: $$tool"; \
@@ -195,21 +195,21 @@ verify:
 		esac; \
 	fi; \
 	echo "Selected directory: $$dir"; \
-	echo "Selected path: $$case_path"; \
+	echo "Selected path: $$project_path"; \
 	echo "VERIFY_ABLATION=$$verify_ablation"; \
 	echo "VERIFY_MODE=$$verify_mode"; \
-	echo "Compile in $$case_path/Chisel: make $$auto_target"; \
-	( cd "$$case_path/Chisel" && VERIFY_MODE="$$verify_mode" $(MAKE) $$auto_target ) || exit $$?; \
-	if [ ! -s "$$case_path/Verilog/$$top_file" ]; then \
-		echo "Missing generated top: $$case_path/Verilog/$$top_file"; \
+	echo "Compile in $$project_path/Chisel: make $$auto_target"; \
+	( cd "$$project_path/Chisel" && VERIFY_MODE="$$verify_mode" $(MAKE) $$auto_target ) || exit $$?; \
+	if [ ! -s "$$project_path/Verilog/$$top_file" ]; then \
+		echo "Missing generated top: $$project_path/Verilog/$$top_file"; \
 		exit 1; \
 	fi; \
 	if [ "$$verify_ablation" = "wo-bounded-liveness" ]; then \
-		echo "Apply ablation preprocessing in $$case_path/Verilog"; \
-		python code/preprocess_sva.py --root "$(XIANGSHAN_CASE_ROOT)" --case "$$dir" || exit $$?; \
+		echo "Apply ablation preprocessing in $$project_path/Verilog"; \
+		python code/preprocess_sva.py --root "$(XIANGSHAN_ROOT)" --case "$$dir" || exit $$?; \
 	fi; \
-	echo "Verify in $$case_path/Verilog: ./setup.sh $$top_file"; \
-	cd "$$case_path/Verilog" && ./setup.sh "$$top_file"
+	echo "Verify in $$project_path/Verilog: ./setup.sh $$top_file"; \
+	cd "$$project_path/Verilog" && ./setup.sh "$$top_file"
 
 0 1 2 3 4 5 6 7 all XiangShan-CoupledL2-copy_equality XiangShan-CoupledL2-write_read XiangShan-CoupledL2-deadlock-v0 XiangShan-CoupledL2-deadlock-v1 XiangShan-CoupledL2-deadlock-v2 XiangShan-CoupledL2-deadlock-v3 XiangShan-CoupledL2-deadlock-v4 XiangShan-CoupledL2-peer-l2:
 	@:

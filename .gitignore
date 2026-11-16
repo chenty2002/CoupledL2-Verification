@@ -11,3 +11,4 @@ build/
 VerilogCodes/
 code/*/Chisel/Verilog
 __pycache__
+**/VerifyTop_*.sv

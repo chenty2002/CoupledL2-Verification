@@ -36,7 +36,7 @@ import sys
 import argparse
 from typing import Dict, List, Optional, Tuple
 
-ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "CaseStudy_1")
+ROOT = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CASE_DIRS: Dict[str, str] = {
     "XiangShan-CoupledL2-deadlock-v0": "XiangShan-CoupledL2-deadlock-v0",
     "XiangShan-CoupledL2-deadlock-v1": "XiangShan-CoupledL2-deadlock-v1",
@@ -47,12 +47,9 @@ DEFAULT_CASE_DIRS: Dict[str, str] = {
 
 def normalize_root(root: str) -> str:
     root = os.path.abspath(root)
-    for candidate in (
-        os.path.join(root, "code", "CaseStudy_1"),
-        os.path.join(root, "CaseStudy_1"),
-    ):
-        if os.path.isdir(candidate):
-            return candidate
+    code_root = os.path.join(root, "code")
+    if os.path.isdir(code_root):
+        return code_root
     return root
 
 
@@ -361,7 +358,7 @@ def main():
     )
     parser.add_argument(
         "--root", default=ROOT,
-        help="Repository root, code root, or CaseStudy_1 (default: code/CaseStudy_1)"
+        help="Repository root or code root (default: code)"
     )
     parser.add_argument(
         "--case", default="all",
