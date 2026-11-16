@@ -33,16 +33,16 @@ Verification projects are located directly under `code/`:
 └── jg-example/
 ```
 
-| Index | Project directory | Checks | Generated file |
+| Index | Project directory | Checks | Waveform |
 | ---: | --- | --- | --- |
-| 0 | `XiangShan-CoupledL2-copy_equality` | Shared-copy data comparison at address 0 across two L2 caches, with guards for in-flight transactions | `VerifyTop_copy_equality.sv` |
-| 1 | `XiangShan-CoupledL2-write_read` | Writeback-data tracking at address 0, matching D-channel responses to accepted A-channel requests by source ID | `VerifyTop_write_read.sv` |
-| 2 | `XiangShan-CoupledL2-deadlock-v0` | MSHR bounded progress | `VerifyTop_accquire.sv` |
-| 3 | `XiangShan-CoupledL2-deadlock-v1` | MSHR bounded progress | `VerifyTop_accquire.sv` |
-| 4 | `XiangShan-CoupledL2-deadlock-v2` | MSHR bounded progress | `VerifyTop_acquire.sv` |
-| 5 | `XiangShan-CoupledL2-deadlock-v3` | MSHR bounded progress | `VerifyTop_acquire.sv` |
-| 6 | `XiangShan-CoupledL2-deadlock-v4` | MSHR bounded progress | `VerifyTop_performance.sv` |
-| 7 | `XiangShan-CoupledL2-peer-l2` | Permission-state checks across peer L2 caches and between L2 and L3 | `VerifyTop_mutual.sv` |
+| 0 | `XiangShan-CoupledL2-copy_equality` | Shared-copy data comparison at address 0 across two L2 caches, with guards for in-flight transactions | [XiangShan-CoupledL2-copy_equality.fst](code/XiangShan-CoupledL2-copy_equality/XiangShan-CoupledL2-copy_equality.fst) |
+| 1 | `XiangShan-CoupledL2-write_read` | Writeback-data tracking at address 0, matching D-channel responses to accepted A-channel requests by source ID | [XiangShan-CoupledL2-write_read-1017.fst](code/XiangShan-CoupledL2-write_read/XiangShan-CoupledL2-write_read-1017.fst) |
+| 2 | `XiangShan-CoupledL2-deadlock-v0` | MSHR bounded progress | [XiangShan-CoupledL2-deadlock-v0.fst](code/XiangShan-CoupledL2-deadlock-v0/XiangShan-CoupledL2-deadlock-v0.fst) |
+| 3 | `XiangShan-CoupledL2-deadlock-v1` | MSHR bounded progress | [XiangShan-CoupledL2-deadlock-v1.fst](code/XiangShan-CoupledL2-deadlock-v1/XiangShan-CoupledL2-deadlock-v1.fst) |
+| 4 | `XiangShan-CoupledL2-deadlock-v2` | MSHR bounded progress | [XiangShan-CoupledL2-deadlock-v2.fst](code/XiangShan-CoupledL2-deadlock-v2/XiangShan-CoupledL2-deadlock-v2.fst) |
+| 5 | `XiangShan-CoupledL2-deadlock-v3` | MSHR bounded progress | [XiangShan-CoupledL2-deadlock-v3.fst](code/XiangShan-CoupledL2-deadlock-v3/XiangShan-CoupledL2-deadlock-v3.fst) |
+| 6 | `XiangShan-CoupledL2-deadlock-v4` | MSHR bounded progress | [XiangShan-CoupledL2-deadlock-v4.fst](code/XiangShan-CoupledL2-deadlock-v4/XiangShan-CoupledL2-deadlock-v4.fst) |
+| 7 | `XiangShan-CoupledL2-peer-l2` | Permission-state checks across peer L2 caches and between L2 and L3 | [XiangShan-CoupledL2-peer-l2.fst](code/XiangShan-CoupledL2-peer-l2/XiangShan-CoupledL2-peer-l2.fst) |
 
 Miss status holding registers (MSHRs) track outstanding cache requests. Bounded progress assertions detect requests that exceed a configured cycle limit. A failure still requires analysis of the wait dependencies to determine whether it is a deadlock.
 
@@ -79,7 +79,7 @@ make verify 1 VERIFY_MODE=large
 make verify 6 VERIFY_MODE=large
 ```
 
-`VERIFY_MODE` defaults to `small`. Indices 0 through 7 also support `large`. The root entry point generates the selected top and invokes `Verilog/setup.sh` with the exact filename listed above.
+`VERIFY_MODE` defaults to `small`. Indices 0 through 7 also support `large`. The root entry point generates the selected top and invokes `Verilog/setup.sh` with the generated filename configured for that project.
 
 To generate a top directly from a project's `Chisel/` directory:
 
@@ -146,20 +146,9 @@ Native L1 uses the client in `Chisel/src/main/scala/nativeL1/`. Its `Chisel/Make
 
 ## Waveforms
 
-All eight FST waveforms contain two `messageGenerators` instances with their own `sourceC` and `probeQueue` instances. The `io_in_isAcquire` signal and top-level `msggenStore` and `msggenData` signals also identify the Message Generator input model.
+The eight FST waveforms linked in the project table contain two `messageGenerators` instances with their own `sourceC` and `probeQueue` instances. The `io_in_isAcquire` signal and top-level `msggenStore` and `msggenData` signals also identify the Message Generator input model.
 
-| Project | Waveform | Input model | Data input width |
-| --- | --- | --- | ---: |
-| `copy_equality` | [XiangShan-CoupledL2-copy_equality.fst](code/XiangShan-CoupledL2-copy_equality/XiangShan-CoupledL2-copy_equality.fst) | Message Generator | 16 |
-| `deadlock-v0` | [XiangShan-CoupledL2-deadlock-v0.fst](code/XiangShan-CoupledL2-deadlock-v0/XiangShan-CoupledL2-deadlock-v0.fst) | Message Generator | 16 |
-| `deadlock-v1` | [XiangShan-CoupledL2-deadlock-v1.fst](code/XiangShan-CoupledL2-deadlock-v1/XiangShan-CoupledL2-deadlock-v1.fst) | Message Generator | 16 |
-| `deadlock-v2` | [XiangShan-CoupledL2-deadlock-v2.fst](code/XiangShan-CoupledL2-deadlock-v2/XiangShan-CoupledL2-deadlock-v2.fst) | Message Generator | 16 |
-| `deadlock-v3` | [XiangShan-CoupledL2-deadlock-v3.fst](code/XiangShan-CoupledL2-deadlock-v3/XiangShan-CoupledL2-deadlock-v3.fst) | Message Generator | 16 |
-| `deadlock-v4` | [XiangShan-CoupledL2-deadlock-v4.fst](code/XiangShan-CoupledL2-deadlock-v4/XiangShan-CoupledL2-deadlock-v4.fst) | Message Generator | 16 |
-| `peer-l2` | [XiangShan-CoupledL2-peer-l2.fst](code/XiangShan-CoupledL2-peer-l2/XiangShan-CoupledL2-peer-l2.fst) | Message Generator | 16 |
-| `write_read` | [XiangShan-CoupledL2-write_read-1017.fst](code/XiangShan-CoupledL2-write_read/XiangShan-CoupledL2-write_read-1017.fst) | Message Generator | 16 |
-
-The 16-bit message-data inputs correspond to the small profile's 2-byte cache lines. The large profile uses 512-bit data inputs. These declarations identify the input model, but do not establish an exact match with the current sources or demonstrate verification of the large profile.
+All eight waveforms have 16-bit message-data inputs, which correspond to the small profile's 2-byte cache lines. The large profile uses 512-bit data inputs. These declarations identify the input model, but do not establish an exact match with the current sources or demonstrate verification of the large profile.
 
 The hierarchy-record encoding follows the [libfst reader implementation](https://github.com/gtkwave/libfst/blob/main/src/fstapi.c). This identification uses hierarchy and signal declarations; it does not require a new simulation or formal run.
 
