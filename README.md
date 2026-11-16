@@ -25,6 +25,7 @@ Verification projects are located directly under `code/`:
 │   ├── XiangShan-CoupledL2-deadlock-v3/
 │   ├── XiangShan-CoupledL2-deadlock-v4/
 │   ├── XiangShan-CoupledL2-peer-l2/
+│   ├── XiangShan-CoupledL2-param-tuning/
 │   ├── XiangShan-CoupledL2-Native-L1/
 │   ├── XiangShan-CoupledL2-TL-Test/
 │   └── preprocess_sva.py
@@ -47,7 +48,7 @@ Miss status holding registers (MSHRs) track outstanding cache requests. Bounded 
 
 `XiangShan-CoupledL2-Native-L1` provides the Native L1 comparison flow. `XiangShan-CoupledL2-TL-Test` provides the TL-Test simulation baseline.
 
-Each Message Generator project contains:
+The indexed Message Generator verification projects contain:
 
 - `Chisel/src/main/scala/messageGenerator/`: `TLMessageGenerator.scala` and the C-channel sender, `MsgGenSourceC.scala`.
 - `Chisel/src/test/scala/`: verification tops, generation entry points, and regression sources.
@@ -60,13 +61,13 @@ Each Message Generator project contains:
 
 The verification tops instantiate `TLMessageGenerator` directly. The generator tracks cache-line addresses, permissions, data, outstanding acquisitions, Grant/GrantAck responses, probes, and Release/ReleaseAck exchanges. It also handles multibeat transfers and channel handshakes.
 
-Top-level inputs select the request address, Acquire or Release operation, exclusive-permission request, and store data. Stores take effect only when the generator holds the required permission. In `deadlock-v0` through `deadlock-v3`, valid inputs update a request-address register. Other projects use the address input directly. The generator's `in_valid` is tied high in these tops.
+Top-level inputs select the request address, Acquire or Release operation, exclusive-permission request, and store data. Stores take effect only when the generator holds the required permission. In `deadlock-v0` through `deadlock-v3`, valid inputs update a request-address register. Other projects use the address input directly. The generator's `in_valid` is tied high in the indexed verification tops. The parameter tuning top exposes valid as an input.
 
 The small profile typically uses 2-byte cache lines, 1-byte channel beats, four source IDs, and three ordinary transaction entries. Some projects enable `retainedGrantCopy`; its setting is defined in the corresponding `VerifyTop.scala`. Observation modules compare state and data exposed by the implementation. These checks do not establish coverage of all processor behaviors.
 
 ## Requirements and quick start
 
-The main flow requires Java, Mill, Python 3, and JasperGold (`jg`). Generation scripts invoke `python`, which must resolve to Python 3. Tool versions are specified in each project's `.mill-version` and `build.sc`. The `copy_equality` and `write_read` projects use Chisel 6.6.0; the other Message Generator projects use Chisel 3.6. Chisel 6 SystemVerilog generation also requires `firtool`.
+The main flow requires Java, Mill, Python 3, and JasperGold (`jg`). Generation scripts invoke `python`, which must resolve to Python 3. Tool versions are specified in each project's `.mill-version` and `build.sc`. The `copy_equality` and `write_read` projects use Chisel 6.6.0; the other indexed Message Generator projects use Chisel 3.6. The parameter tuning project also uses Chisel 6.6.0. Chisel 6 SystemVerilog generation also requires `firtool`.
 
 From the repository root:
 
@@ -112,6 +113,22 @@ python code/preprocess_sva.py --case XiangShan-CoupledL2-deadlock-v0 --dry-run
 ```
 
 `deadlock-v4` uses `assertLivenessTimer` and is not supported by this conversion entry point. `VERIFY_ABLATION` defaults to `none`. Check the generated assertions and tool results to determine which properties are active and what has been verified; source-level wiring alone is not a completed verification result.
+
+## Parameter tuning
+
+[`code/XiangShan-CoupledL2-param-tuning/`](code/XiangShan-CoupledL2-param-tuning/README.md) provides ordered parameter search for two Message Generators, two CoupledL2 caches, HuanCun L3, and RAM. Its search and result-classification code comes from [param_tuning](https://github.com/chenty2002/param_tuning). Sources and dependencies are ordinary files in this repository.
+
+The `l1.*` configuration fields describe Message Generator directory geometry and transaction entries. The search preserves candidate ordering, static filtering, per-property JasperGold classification, failure blocking, and independent recheck. A `bounded_no_cex` result records the fixed proof window's outcome. Runtime output and experiment results are ignored.
+
+Run this separate flow from its own directory:
+
+```bash
+cd code/XiangShan-CoupledL2-param-tuning
+python3 search.py list --limit 20
+python3 runner.py --search
+```
+
+See its [README](code/XiangShan-CoupledL2-param-tuning/README.md) for tool requirements, parameter meanings, and result rules. It uses `Chisel/` for the source project and `verilog/` for fixed support files and ignored runtime output.
 
 ## Native L1 and TL-Test
 
